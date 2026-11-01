@@ -1,7 +1,7 @@
-use std::cell::{Cell, RefCell};
+use std::cell::{Cell, Ref, RefCell};
 use std::ptr::NonNull;
 
-use objc2::rc::Retained;
+use objc2::rc::{Retained, Weak};
 use objc2::runtime::{AnyObject, ProtocolObject};
 use objc2::{AnyThread, DefinedClass, MainThreadOnly, define_class, msg_send};
 use objc2_app_kit::{
@@ -22,6 +22,7 @@ use prasasti_core::edit::{self, Edit};
 use prasasti_core::file::normalize_newlines;
 use prasasti_core::list;
 
+use crate::find_bar::FindBar;
 use crate::styler::{Styler, hidden_key};
 use crate::theme::{Palette, base_font, palette};
 use crate::util::{guarded, to_u16};
@@ -34,6 +35,8 @@ pub struct Ivars {
     /// The caret as of the last selection change, for marker reveal.
     caret: Cell<usize>,
     pal: RefCell<Palette>,
+    /// The window's find bar, which repaints its matches after edits.
+    find_bar: RefCell<Weak<FindBar>>,
 }
 
 define_class!(
@@ -58,6 +61,9 @@ define_class!(
             let pal = self.ivars().pal.borrow();
             // The selection moves after this; the end of the edit is where it lands.
             guarded(|| styler.restyle_edit(storage, &base_font(), &pal, range, range.end()));
+            if let Some(bar) = self.find_bar() {
+                guarded(|| bar.text_changed());
+            }
         }
     }
 
@@ -196,13 +202,21 @@ define_class!(
         #[unsafe(method(resetZoom:))]
         fn reset_zoom(&self, _sender: Option<&AnyObject>) {}
         #[unsafe(method(showFindBar:))]
-        fn show_find_bar(&self, _sender: Option<&AnyObject>) {}
+        fn show_find_bar(&self, _sender: Option<&AnyObject>) {
+            self.find_bar().map(|b| guarded(|| b.show(false)));
+        }
         #[unsafe(method(showFindReplaceBar:))]
-        fn show_find_replace_bar(&self, _sender: Option<&AnyObject>) {}
+        fn show_find_replace_bar(&self, _sender: Option<&AnyObject>) {
+            self.find_bar().map(|b| guarded(|| b.show(true)));
+        }
         #[unsafe(method(findNext:))]
-        fn find_next(&self, _sender: Option<&AnyObject>) {}
+        fn find_next(&self, _sender: Option<&AnyObject>) {
+            self.find_bar().map(|b| guarded(|| b.next()));
+        }
         #[unsafe(method(findPrevious:))]
-        fn find_previous(&self, _sender: Option<&AnyObject>) {}
+        fn find_previous(&self, _sender: Option<&AnyObject>) {
+            self.find_bar().map(|b| guarded(|| b.previous()));
+        }
     }
 );
 
@@ -236,6 +250,18 @@ fn range_of(r: NSRange) -> std::ops::Range<usize> {
 impl EditorView {
     pub fn storage(&self) -> &NSTextStorage {
         &self.ivars().storage
+    }
+
+    pub fn find_bar(&self) -> Option<Retained<FindBar>> {
+        self.ivars().find_bar.borrow().load()
+    }
+
+    pub fn set_find_bar(&self, bar: &FindBar) {
+        *self.ivars().find_bar.borrow_mut() = Weak::new(bar);
+    }
+
+    pub fn palette(&self) -> Ref<'_, Palette> {
+        self.ivars().pal.borrow()
     }
 
     /// Applies `e` as one undoable user edit (restyled by the storage
@@ -294,6 +320,9 @@ impl EditorView {
             guarded(|| styler.restyle_all(self.storage(), &font, &pal, caret));
         }
         *self.ivars().pal.borrow_mut() = pal;
+        if let Some(bar) = self.find_bar() {
+            guarded(|| bar.paint());
+        }
     }
 }
 
@@ -316,6 +345,7 @@ pub fn make_editor(frame: NSRect) -> Retained<EditorView> {
         styler: RefCell::new(Styler::default()),
         caret: Cell::new(0),
         pal: RefCell::new(palette(false)),
+        find_bar: RefCell::default(),
     });
     // SAFETY: designated initializer of NSTextView with matching argument types.
     let editor: Retained<EditorView> =

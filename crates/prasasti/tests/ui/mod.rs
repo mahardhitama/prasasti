@@ -4,12 +4,13 @@
 use objc2::MainThreadOnly;
 use objc2::rc::Retained;
 use objc2_app_kit::{
-    NSApplication, NSBackingStoreType, NSEvent, NSEventModifierFlags, NSEventType, NSMenu,
+    NSApplication, NSBackingStoreType, NSEvent, NSEventMask, NSEventModifierFlags, NSEventType, NSMenu,
     NSMenuItem, NSWindow,
     NSWindowStyleMask,
 };
-use objc2_foundation::{MainThreadMarker, NSDate, NSObjectProtocol, NSPoint, NSRect, NSRunLoop, NSSize, NSString};
-use prasasti::editor::{EditorView, editor_in_scroll};
+use objc2_foundation::{MainThreadMarker, NSDate, NSDefaultRunLoopMode, NSObjectProtocol, NSPoint, NSRect, NSRunLoop, NSSize, NSString};
+use prasasti::document::window_content;
+use prasasti::editor::EditorView;
 use prasasti::menu;
 
 pub const LEFT: &str = "\u{F702}";
@@ -22,8 +23,8 @@ fn mtm() -> MainThreadMarker {
     MainThreadMarker::new().unwrap()
 }
 
-/// An off-screen window (never ordered front) holding the editor in a scroll
-/// view, the editor first responder, and the app's main menu installed.
+/// An off-screen window (never ordered front) holding the document window's
+/// content (find bar, editor in a scroll view), the editor first responder, and the app's main menu installed.
 pub fn window_with(text: &str) -> (Retained<NSWindow>, Retained<EditorView>) {
     let mtm = mtm();
     let frame = NSRect::new(NSPoint::new(0.0, 0.0), NSSize::new(600.0, 400.0));
@@ -38,9 +39,9 @@ pub fn window_with(text: &str) -> (Retained<NSWindow>, Retained<EditorView>) {
         )
     };
     unsafe { win.setReleasedWhenClosed(false) };
-    let (scroll, editor) = editor_in_scroll(frame);
+    let (content, editor) = window_content(frame);
     editor.setString(&NSString::from_str(text));
-    win.setContentView(Some(&scroll));
+    win.setContentView(Some(&content));
     win.makeFirstResponder(Some(&editor));
     menu::install(&NSApplication::sharedApplication(mtm), mtm);
     (win, editor)
@@ -74,10 +75,21 @@ fn event(win: &NSWindow, kind: NSEventType, key: &str, mods: NSEventModifierFlag
     .expect("key event")
 }
 
+/// Sends `ev` to the window as NSApp's current event, as a real key press is
+/// (field-editor delegates read modifiers such as Shift-Return from it).
+fn send(win: &NSWindow, ev: Retained<NSEvent>) {
+    let app = NSApplication::sharedApplication(mtm());
+    app.postEvent_atStart(&ev, true);
+    let ev = app
+        .nextEventMatchingMask_untilDate_inMode_dequeue(NSEventMask::Any, None, unsafe { NSDefaultRunLoopMode }, true)
+        .expect("posted event");
+    win.sendEvent(&ev);
+}
+
 /// Sends one key-down/key-up pair through the window.
 pub fn key(win: &NSWindow, key: &str, mods: NSEventModifierFlags) {
-    win.sendEvent(&event(win, NSEventType::KeyDown, key, mods));
-    win.sendEvent(&event(win, NSEventType::KeyUp, key, mods));
+    send(win, event(win, NSEventType::KeyDown, key, mods));
+    send(win, event(win, NSEventType::KeyUp, key, mods));
 }
 
 /// Types `s`, one key-down/key-up pair per character.

@@ -4,17 +4,18 @@ use objc2::rc::Retained;
 use objc2::runtime::{AnyObject, Bool};
 use objc2::{DefinedClass, MainThreadOnly, define_class, msg_send};
 use objc2_app_kit::{
-    NSBackingStoreType, NSDocument, NSWindow,
-    NSWindowController, NSWindowStyleMask,
+    NSBackingStoreType, NSDocument, NSLayoutAttribute, NSStackView,
+    NSUserInterfaceLayoutOrientation, NSView, NSWindow, NSWindowController, NSWindowStyleMask,
 };
 use objc2_foundation::{
-    MainThreadMarker, NSCocoaErrorDomain, NSCopying, NSData, NSDictionary, NSError,
+    MainThreadMarker, NSArray, NSCocoaErrorDomain, NSCopying, NSData, NSDictionary, NSError,
     NSFileReadInapplicableStringEncodingError, NSLocalizedDescriptionKey, NSObjectProtocol,
     NSPoint, NSRect, NSSize, NSString, ns_string,
 };
 use prasasti_core::file::{decode, normalize_newlines, saves_unchanged};
 
 use crate::editor::{EditorView, editor_in_scroll};
+use crate::find_bar::FindBar;
 use crate::util::guarded;
 
 /// Why autosave must not write the file right now.
@@ -70,9 +71,9 @@ define_class!(
             };
             unsafe { window.setReleasedWhenClosed(false) };
 
-            let (scroll, editor) = editor_in_scroll(frame);
+            let (content, editor) = window_content(frame);
             editor.setString(&self.ivars().text.borrow());
-            window.setContentView(Some(&scroll));
+            window.setContentView(Some(&content));
             window.makeFirstResponder(Some(&editor));
 
             let controller = NSWindowController::initWithWindow(
@@ -150,6 +151,19 @@ impl PrasastiDocument {
     pub fn editor(&self) -> Option<Retained<EditorView>> {
         self.ivars().editor.borrow().clone()
     }
+}
+
+/// The window's content, top to bottom: the (hidden) find bar, then the editor.
+pub fn window_content(frame: NSRect) -> (Retained<NSStackView>, Retained<EditorView>) {
+    let mtm = MainThreadMarker::new().expect("windows are built on the main thread");
+    let (scroll, editor) = editor_in_scroll(frame);
+    let bar = FindBar::new(mtm, &editor);
+    let stack = NSStackView::stackViewWithViews(&NSArray::from_slice(&[&*bar as &NSView, &scroll]), mtm);
+    stack.setFrame(frame);
+    stack.setOrientation(NSUserInterfaceLayoutOrientation::Vertical);
+    stack.setAlignment(NSLayoutAttribute::Width);
+    stack.setSpacing(0.0);
+    (stack, editor)
 }
 
 fn not_utf8_error() -> Retained<NSError> {

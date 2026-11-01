@@ -5,9 +5,9 @@ mod ui;
 use std::time::Instant;
 
 use objc2::rc::{Retained, autoreleasepool};
-use objc2::runtime::AnyObject;
+use objc2::runtime::{AnyObject, NSObjectProtocol};
 use objc2_app_kit::{
-    NSApplication, NSDocument, NSEventModifierFlags, NSFont, NSFontManager, NSFontTraitMask,
+    NSApplication, NSBackgroundColorAttributeName, NSButton, NSDocument, NSEventModifierFlags, NSFont, NSFontManager, NSFontTraitMask,
     NSGlyphProperty, NSPasteboard, NSPasteboardTypeString, NSTextInputClient, NSTextStorage,
 };
 use objc2_foundation::{
@@ -16,6 +16,7 @@ use objc2_foundation::{
 };
 use prasasti::document::{HoldReason, PrasastiDocument};
 use prasasti::editor::{EditorView, make_editor};
+use prasasti::find_bar::FindBar;
 use prasasti::styler::{Styler, hidden_key};
 use prasasti::theme::{base_font, palette};
 
@@ -278,6 +279,7 @@ fn keystroke_in_large_doc_restyles_locally() {
 }
 
 const CMD: NSEventModifierFlags = NSEventModifierFlags::Command;
+const OPT_CMD: NSEventModifierFlags = NSEventModifierFlags::Option.union(CMD);
 
 /// Runs `f` with the general pasteboard holding `s`, restoring its string after.
 fn with_clipboard<T>(s: &str, f: impl FnOnce() -> T) -> T {
@@ -359,6 +361,150 @@ fn paste_normalizes_crlf() {
     assert_eq!(text, "a\nb");
 }
 
+fn find_bar(e: &EditorView) -> Retained<FindBar> {
+    e.find_bar().expect("editor has a find bar")
+}
+
+/// The bar's button titled `title`, as the user sees it.
+fn button(bar: &FindBar, title: &str) -> Retained<NSButton> {
+    bar.subviews()
+        .iter()
+        .find_map(|v| v.downcast::<NSButton>().ok().filter(|b| b.title().to_string() == title))
+        .unwrap_or_else(|| panic!("no {title:?} button"))
+}
+
+fn click(b: &NSButton) {
+    // SAFETY: a nil sender is allowed.
+    unsafe { b.performClick(None) };
+}
+
+fn match_bg(e: &EditorView, i: usize) -> Option<Retained<AnyObject>> {
+    let lm = unsafe { e.layoutManager() }.expect("layout manager");
+    // SAFETY: a null effective-range pointer is allowed; `i` is in the text.
+    unsafe { lm.temporaryAttribute_atCharacterIndex_effectiveRange(NSBackgroundColorAttributeName, i, std::ptr::null_mut()) }
+}
+
+fn is_first_responder(win: &objc2_app_kit::NSWindow, e: &EditorView) -> bool {
+    win.firstResponder().is_some_and(|r| std::ptr::eq(&*r, e.as_ref() as &objc2_app_kit::NSResponder))
+}
+
+/// Opens the bar on `text` (caret at 0) and types `query` into its search field.
+fn searching(text: &str, query: &str, replace: bool) -> (Retained<objc2_app_kit::NSWindow>, Retained<EditorView>) {
+    let (win, e) = ui::window_with(text);
+    e.setSelectedRange(NSRange::new(0, 0));
+    ui::shortcut(&win, "f", if replace { OPT_CMD } else { CMD });
+    ui::type_text(&win, query);
+    (win, e)
+}
+
+fn paints_matches() {
+    let (win, e) = searching("tara țară", "tara", false);
+    let bar = find_bar(&e);
+    assert_eq!(bar.matches(), vec![0, 5]);
+    let pal = palette(false);
+    assert!(match_bg(&e, 0).is_some_and(|c| pal.current.isEqual(Some(&*c))));
+    assert!(match_bg(&e, 5).is_some_and(|c| pal.search.isEqual(Some(&*c))));
+    assert!(match_bg(&e, 4).is_none());
+    assert_eq!(e.string().to_string(), "tara țară");
+    assert_eq!(e.selectedRange(), NSRange::new(0, 4));
+    win.close();
+}
+
+fn return_steps_matches() {
+    let (win, e) = searching("a a a", "a", false);
+    assert_eq!(e.selectedRange(), NSRange::new(0, 1));
+    ui::key(&win, "\r", NSEventModifierFlags::empty());
+    assert_eq!(e.selectedRange(), NSRange::new(2, 1));
+    ui::key(&win, "\r", NSEventModifierFlags::Shift);
+    assert_eq!(e.selectedRange(), NSRange::new(0, 1));
+    ui::shortcut(&win, "g", CMD);
+    assert_eq!(e.selectedRange(), NSRange::new(2, 1));
+    ui::shortcut(&win, "G", CMD);
+    assert_eq!(e.selectedRange(), NSRange::new(0, 1));
+    assert_eq!(e.string().to_string(), "a a a");
+    win.close();
+}
+
+fn replace_all_one_undo() {
+    let (win, e) = searching("a a a", "a", true);
+    ui::key(&win, "\t", NSEventModifierFlags::empty());
+    ui::type_text(&win, "b");
+    ui::pump(0.05);
+    click(&button(&find_bar(&e), "Replace All"));
+    assert_eq!(e.string().to_string(), "b b b");
+    assert_eq!(e.selectedRange(), NSRange::new(5, 0));
+    assert!(find_bar(&e).matches().is_empty());
+    ui::pump(0.05);
+    // The fields keep their own undo (AppKit's field editor); the document's is the editor's.
+    win.makeFirstResponder(Some(&e));
+    ui::shortcut(&win, "z", CMD);
+    assert_eq!(e.string().to_string(), "a a a");
+    assert_eq!(e.selectedRange(), NSRange::new(0, 5));
+    assert_eq!(find_bar(&e).matches(), vec![0, 2, 4]);
+    win.close();
+}
+
+fn matches_follow_edits_without_moving_caret() {
+    let (win, e) = searching("a", "a", false);
+    win.makeFirstResponder(Some(&e));
+    e.setSelectedRange(NSRange::new(0, 0));
+    ui::type_text(&win, "x ");
+    assert_eq!(e.string().to_string(), "x a");
+    assert_eq!(e.selectedRange(), NSRange::new(2, 0));
+    assert_eq!(find_bar(&e).matches(), vec![2]);
+    ui::pump(0.05);
+    assert!(match_bg(&e, 2).is_some());
+    assert!(match_bg(&e, 0).is_none());
+    win.close();
+}
+
+fn replace_one_advances() {
+    let (win, e) = searching("a a", "a", false);
+    let replace = button(&find_bar(&e), "Replace");
+    assert!(replace.isHidden(), "find-only mode");
+    // ⌥⌘F from the search field switches to find and replace.
+    ui::shortcut(&win, "f", OPT_CMD);
+    assert!(!replace.isHidden());
+    ui::key(&win, "\t", NSEventModifierFlags::empty());
+    ui::type_text(&win, "b");
+    click(&replace);
+    assert_eq!(e.string().to_string(), "b a");
+    assert_eq!(e.selectedRange(), NSRange::new(2, 1));
+    click(&replace);
+    assert_eq!(e.string().to_string(), "b b");
+    assert_eq!(e.selectedRange(), NSRange::new(3, 0));
+    win.close();
+}
+
+fn escape_closes_bar() {
+    let (win, e) = searching("a a", "a", false);
+    ui::key(&win, "\u{1b}", NSEventModifierFlags::empty());
+    let bar = find_bar(&e);
+    assert!(bar.isHidden());
+    let content = win.contentView().expect("content");
+    content.layoutSubtreeIfNeeded();
+    assert_eq!(e.enclosingScrollView().expect("scroll").frame(), content.bounds(), "editor takes the bar's room");
+    assert!(match_bg(&e, 0).is_none() && match_bg(&e, 2).is_none());
+    assert!(is_first_responder(&win, &e));
+    assert_eq!(e.string().to_string(), "a a");
+    assert_eq!(e.selectedRange(), NSRange::new(0, 1));
+    // Reopening searches again for what the field holds.
+    ui::shortcut(&win, "f", CMD);
+    assert_eq!(bar.matches(), vec![0, 2]);
+    win.close();
+}
+
+fn replace_all_keeps_far_markers_hidden() {
+    let (win, e) = searching("**a** b a", "a", true);
+    ui::key(&win, "\t", NSEventModifierFlags::empty());
+    ui::type_text(&win, "c");
+    click(&button(&find_bar(&e), "Replace All"));
+    assert_eq!(e.string().to_string(), "**c** b c");
+    assert_eq!(e.selectedRange(), NSRange::new(9, 0));
+    assert!([0, 1, 3, 4].iter().all(|&i| hidden(e.storage(), i)));
+    win.close();
+}
+
 fn main() {
     let _app = NSApplication::sharedApplication(mtm());
     let tests: &[(&str, fn())] = &[
@@ -385,6 +531,13 @@ fn main() {
         ("tab_outside_list_inserts_tab", tab_outside_list_inserts_tab),
         ("link_from_clipboard", link_from_clipboard),
         ("paste_normalizes_crlf", paste_normalizes_crlf),
+        ("paints_matches", paints_matches),
+        ("return_steps_matches", return_steps_matches),
+        ("replace_all_one_undo", replace_all_one_undo),
+        ("matches_follow_edits_without_moving_caret", matches_follow_edits_without_moving_caret),
+        ("replace_one_advances", replace_one_advances),
+        ("escape_closes_bar", escape_closes_bar),
+        ("replace_all_keeps_far_markers_hidden", replace_all_keeps_far_markers_hidden),
     ];
     let mut failed = 0;
     for (name, f) in tests {
