@@ -65,7 +65,9 @@ fn event(win: &NSWindow, kind: NSEventType, key: &str, mods: NSEventModifierFlag
     if [LEFT, RIGHT, UP, DOWN].contains(&key) {
         mods |= NSEventModifierFlags::NumericPad | NSEventModifierFlags::Function;
     }
-    let s = NSString::from_str(key);
+    // The keyboard reports Shift-Tab as the backtab character (U+0019).
+    let chars = if key == "\t" && mods.contains(NSEventModifierFlags::Shift) { "\u{19}" } else { key };
+    let s = NSString::from_str(chars);
     NSEvent::keyEventWithType_location_modifierFlags_timestamp_windowNumber_context_characters_charactersIgnoringModifiers_isARepeat_keyCode(
         kind, NSPoint::new(0.0, 0.0), mods, 0.0, win.windowNumber(), None, &s, &s, false, key_code(key),
     )

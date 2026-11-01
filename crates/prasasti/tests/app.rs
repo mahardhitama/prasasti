@@ -277,6 +277,88 @@ fn keystroke_in_large_doc_restyles_locally() {
     assert!(r.location <= mid && mid < r.location + r.length);
 }
 
+const CMD: NSEventModifierFlags = NSEventModifierFlags::Command;
+
+/// Runs `f` with the general pasteboard holding `s`, restoring its string after.
+fn with_clipboard<T>(s: &str, f: impl FnOnce() -> T) -> T {
+    let pb = NSPasteboard::generalPasteboard();
+    let type_ = unsafe { NSPasteboardTypeString };
+    let saved = pb.stringForType(type_);
+    pb.clearContents();
+    pb.setString_forType(&NSString::from_str(s), type_);
+    let r = std::panic::catch_unwind(std::panic::AssertUnwindSafe(f));
+    pb.clearContents();
+    if let Some(s) = saved {
+        pb.setString_forType(&s, type_);
+    }
+    r.unwrap_or_else(|e| std::panic::resume_unwind(e))
+}
+
+fn bold_undoes_in_one_step() {
+    let (win, e) = ui::window_with("a word b");
+    e.setSelectedRange(NSRange::new(2, 4));
+    ui::shortcut(&win, "b", CMD);
+    assert_eq!(e.string().to_string(), "a **word** b");
+    ui::pump(0.05);
+    ui::shortcut(&win, "z", CMD);
+    assert_eq!(e.string().to_string(), "a word b");
+    win.close();
+}
+
+fn bold_typing_round_trip() {
+    let (win, e) = ui::window_with("a ");
+    e.setSelectedRange(NSRange::new(2, 0));
+    ui::shortcut(&win, "b", CMD);
+    ui::type_text(&win, "hi");
+    ui::shortcut(&win, "b", CMD);
+    ui::type_text(&win, " more");
+    assert_eq!(e.string().to_string(), "a **hi** more");
+    win.close();
+}
+
+fn tab_nests_list_item() {
+    let (win, e) = ui::window_with("- one\n- two");
+    e.setSelectedRange(NSRange::new(11, 0));
+    ui::key(&win, "\t", NSEventModifierFlags::empty());
+    assert_eq!(e.string().to_string(), "- one\n    - two");
+    assert_eq!(e.selectedRange(), NSRange::new(15, 0));
+    ui::key(&win, "\t", NSEventModifierFlags::Shift);
+    assert_eq!(e.string().to_string(), "- one\n- two");
+    assert_eq!(e.selectedRange(), NSRange::new(11, 0));
+    win.close();
+}
+
+fn tab_outside_list_inserts_tab() {
+    let (win, e) = ui::window_with("plain");
+    e.setSelectedRange(NSRange::new(5, 0));
+    ui::key(&win, "\t", NSEventModifierFlags::empty());
+    assert_eq!(e.string().to_string(), "plain\t");
+    win.close();
+}
+
+fn link_from_clipboard() {
+    let text = with_clipboard("https://x.org", || {
+        let (win, e) = ui::window_with("site");
+        e.setSelectedRange(NSRange::new(0, 4));
+        ui::shortcut(&win, "k", CMD);
+        let t = e.string().to_string();
+        win.close();
+        t
+    });
+    assert_eq!(text, "[site](https://x.org)");
+}
+
+fn paste_normalizes_crlf() {
+    let text = with_clipboard("a\r\nb", || {
+        let (win, e) = ui::window_with("");
+        ui::shortcut(&win, "v", CMD);
+        let t = e.string().to_string();
+        win.close();
+        t
+    });
+    assert_eq!(text, "a\nb");
+}
+
 fn main() {
     let _app = NSApplication::sharedApplication(mtm());
     let tests: &[(&str, fn())] = &[
@@ -297,6 +379,12 @@ fn main() {
         ("styles_bold_after_emoji", styles_bold_after_emoji),
         ("restyles_2mb_under_1s", restyles_2mb_under_1s),
         ("keystroke_in_large_doc_restyles_locally", keystroke_in_large_doc_restyles_locally),
+        ("bold_undoes_in_one_step", bold_undoes_in_one_step),
+        ("bold_typing_round_trip", bold_typing_round_trip),
+        ("tab_nests_list_item", tab_nests_list_item),
+        ("tab_outside_list_inserts_tab", tab_outside_list_inserts_tab),
+        ("link_from_clipboard", link_from_clipboard),
+        ("paste_normalizes_crlf", paste_normalizes_crlf),
     ];
     let mut failed = 0;
     for (name, f) in tests {

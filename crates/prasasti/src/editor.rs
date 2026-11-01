@@ -8,18 +8,23 @@ use objc2_app_kit::{
     NSAppearanceCustomization, NSAppearanceNameAqua, NSAppearanceNameDarkAqua,
     NSAutoresizingMaskOptions, NSBackgroundColorAttributeName, NSFont,
     NSForegroundColorAttributeName, NSGlyphProperty, NSLayoutManager, NSLayoutManagerDelegate,
-    NSResponder, NSScrollView, NSText, NSTextContainer, NSTextDelegate, NSTextStorage,
-    NSTextStorageDelegate, NSTextStorageEditActions, NSTextView, NSTextViewDelegate, NSView,
+    NSPasteboard, NSPasteboardTypeString, NSResponder, NSScrollView, NSText, NSTextContainer,
+    NSTextDelegate, NSTextInputClient, NSTextStorage, NSTextStorageDelegate,
+    NSTextStorageEditActions, NSTextView, NSTextViewDelegate, NSView,
 };
 
 use objc2_foundation::{
     MainThreadMarker, NSArray, NSDictionary, NSInteger, NSNotification, NSObject,
-    NSObjectProtocol, NSPoint, NSRange, NSRect, NSSize, NSUInteger,
+    NSNotFound, NSObjectProtocol, NSPoint, NSRange, NSRect, NSSize, NSString, NSUInteger,
 };
+
+use prasasti_core::edit::{self, Edit};
+use prasasti_core::file::normalize_newlines;
+use prasasti_core::list;
 
 use crate::styler::{Styler, hidden_key};
 use crate::theme::{Palette, base_font, palette};
-use crate::util::guarded;
+use crate::util::{guarded, to_u16};
 
 pub struct Ivars {
     /// The view does not retain its storage (the storage owns the layout
@@ -129,13 +134,59 @@ define_class!(
         }
 
         #[unsafe(method(toggleBold:))]
-        fn toggle_bold(&self, _sender: Option<&AnyObject>) {}
+        fn toggle_bold(&self, _sender: Option<&AnyObject>) {
+            self.emphasis("**");
+        }
         #[unsafe(method(toggleItalic:))]
-        fn toggle_italic(&self, _sender: Option<&AnyObject>) {}
+        fn toggle_italic(&self, _sender: Option<&AnyObject>) {
+            self.emphasis("*");
+        }
         #[unsafe(method(toggleStrikethrough:))]
-        fn toggle_strikethrough(&self, _sender: Option<&AnyObject>) {}
+        fn toggle_strikethrough(&self, _sender: Option<&AnyObject>) {
+            self.emphasis("~~");
+        }
         #[unsafe(method(insertLink:))]
-        fn insert_link(&self, _sender: Option<&AnyObject>) {}
+        fn insert_link(&self, _sender: Option<&AnyObject>) {
+            let clip = NSPasteboard::generalPasteboard()
+                .stringForType(unsafe { NSPasteboardTypeString })
+                .map(|s| s.to_string())
+                .unwrap_or_default();
+            let text = to_u16(&self.string());
+            let sel = range_of(self.selectedRange());
+            if let Some(e) = guarded(|| edit::insert_link(&text, sel, &clip)) {
+                self.apply_edit(&e);
+            }
+        }
+
+        #[unsafe(method(insertTab:))]
+        fn insert_tab(&self, sender: Option<&AnyObject>) {
+            if !self.indent(false) {
+                // SAFETY: NSTextView's own implementation, same signature.
+                let () = unsafe { msg_send![super(self), insertTab: sender] };
+            }
+        }
+        #[unsafe(method(insertBacktab:))]
+        fn insert_backtab(&self, sender: Option<&AnyObject>) {
+            if !self.indent(true) {
+                // SAFETY: NSTextView's own implementation, same signature.
+                let () = unsafe { msg_send![super(self), insertBacktab: sender] };
+            }
+        }
+
+        /// Plain-string pastes go in with LF line endings; anything else is AppKit's.
+        #[unsafe(method(paste:))]
+        fn paste(&self, sender: Option<&AnyObject>) {
+            let pb = NSPasteboard::generalPasteboard();
+            let Some(s) = pb.stringForType(unsafe { NSPasteboardTypeString }) else {
+                // SAFETY: NSText's own implementation, same signature.
+                let () = unsafe { msg_send![super(self), paste: sender] };
+                return;
+            };
+            let Some(s) = guarded(|| normalize_newlines(&s.to_string())) else { return };
+            // SAFETY: an NSString is a valid argument; NSNotFound means "the selection".
+            unsafe { self.insertText_replacementRange(&NSString::from_str(&s), NSRange::new(NSNotFound as usize, 0)) };
+        }
+
         #[unsafe(method(copyAsHTML:))]
         fn copy_as_html(&self, _sender: Option<&AnyObject>) {}
         #[unsafe(method(zoomIn:))]
@@ -178,9 +229,48 @@ fn caret_before_hidden(storage: &NSTextStorage, old: NSRange, new: NSRange) -> N
     if start < new.location && start == step.end() { NSRange::new(start, 0) } else { new }
 }
 
+fn range_of(r: NSRange) -> std::ops::Range<usize> {
+    r.location..r.end()
+}
+
 impl EditorView {
     pub fn storage(&self) -> &NSTextStorage {
         &self.ivars().storage
+    }
+
+    /// Applies `e` as one undoable user edit (restyled by the storage
+    /// delegate), then selects `e.selection`.
+    pub fn apply_edit(&self, e: &Edit) {
+        let range = NSRange::new(e.range.start, e.range.len());
+        let replacement = NSString::from_str(&e.replacement);
+        if !self.shouldChangeTextInRange_replacementString(range, Some(&replacement)) {
+            return;
+        }
+        self.storage().replaceCharactersInRange_withString(range, &replacement);
+        self.didChangeText();
+        self.setSelectedRange(NSRange::new(e.selection.start, e.selection.len()));
+    }
+
+    fn emphasis(&self, marker: &str) {
+        let text = to_u16(&self.string());
+        let sel = range_of(self.selectedRange());
+        if let Some(e) = guarded(|| edit::toggle_emphasis(&text, sel, marker)) {
+            self.apply_edit(&e);
+        }
+    }
+
+    /// Nests or lifts the list items under the selection; false when Tab
+    /// should type as usual.
+    fn indent(&self, outdent: bool) -> bool {
+        let text = to_u16(&self.string());
+        let sel = range_of(self.selectedRange());
+        match guarded(|| list::indent(&text, sel, outdent)).flatten() {
+            Some(e) => {
+                self.apply_edit(&e);
+                true
+            }
+            None => false,
+        }
     }
 
     /// Colours from the effective appearance, then a full restyle.
