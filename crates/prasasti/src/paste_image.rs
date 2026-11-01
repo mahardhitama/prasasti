@@ -4,7 +4,7 @@
 use std::collections::HashMap;
 use std::fs::{self, File, OpenOptions};
 use std::io;
-use std::path::{Path, PathBuf};
+use std::path::{Component, Path, PathBuf};
 
 /// `<dir>/<stem>.assets` for a document at `doc_path`.
 pub fn assets_dir(doc_path: &Path) -> PathBuf {
@@ -32,12 +32,15 @@ pub fn create_new(dir: &Path, name: &str) -> io::Result<(PathBuf, File)> {
 
 /// Copies each existing file in `paths` (absolute, UTF-16) that lies under one
 /// of `sources` into `dest_dir`. Returns old path to copy, and the errors.
+/// Each copy is a new file, listed in the map's values.
 pub fn carry(paths: &[Vec<u16>], sources: &[PathBuf], dest_dir: &Path) -> (HashMap<Vec<u16>, Vec<u16>>, Vec<String>) {
     let (mut map, mut errors) = (HashMap::new(), Vec::new());
     for key in paths {
         let Ok(s) = String::from_utf16(key) else { continue };
         let src = Path::new(&s);
-        if map.contains_key(key) || !sources.iter().any(|d| src.starts_with(d)) || !src.is_file() {
+        // `starts_with` is lexical: `assets/../x` must not count as inside `assets`.
+        let inside = !src.components().any(|c| c == Component::ParentDir) && sources.iter().any(|d| src.starts_with(d));
+        if map.contains_key(key) || !inside || !src.is_file() {
             continue;
         }
         let name = src.file_name().unwrap_or_default().to_string_lossy();
@@ -56,4 +59,21 @@ pub fn carry(paths: &[Vec<u16>], sources: &[PathBuf], dest_dir: &Path) -> (HashM
         }
     }
     (map, errors)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn carry_rejects_parent_components() {
+        let root = std::env::temp_dir().join(format!("prasasti-carry-dots-{}", std::process::id()));
+        let src = root.join("doc.assets");
+        fs::create_dir_all(&src).unwrap();
+        fs::write(root.join("x.png"), b"x").unwrap();
+        let sneaky: Vec<u16> = format!("{}/../x.png", src.display()).encode_utf16().collect();
+        let (map, errors) = carry(&[sneaky], &[src], &root.join("out"));
+        let _ = fs::remove_dir_all(&root);
+        assert!(map.is_empty() && errors.is_empty());
+    }
 }

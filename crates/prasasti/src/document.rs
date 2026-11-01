@@ -67,6 +67,8 @@ pub struct Ivars {
     read_from_disk: Cell<bool>,
     /// Where pasted images of this document go until it is saved.
     paste_dir: RefCell<Option<PathBuf>>,
+    /// Saves waiting one run-loop turn after an image rebase (`prasastiContinueSaves`).
+    deferred_saves: RefCell<Vec<Box<dyn FnOnce()>>>,
 }
 
 impl Ivars {
@@ -84,6 +86,7 @@ impl Ivars {
             titlebar: RefCell::new(None),
             read_from_disk: Cell::new(false),
             paste_dir: RefCell::new(None),
+            deferred_saves: RefCell::new(Vec::new()),
         }
     }
 }
@@ -352,6 +355,14 @@ define_class!(
             copy
         }
 
+        #[unsafe(method(prasastiContinueSaves))]
+        fn continue_saves(&self) {
+            let saves = self.ivars().deferred_saves.take();
+            for save in saves {
+                guarded(save);
+            }
+        }
+
         #[unsafe(method(prasastiDeleted))]
         fn deleted_on_main(&self) {
             guarded(|| self.deleted());
@@ -407,10 +418,11 @@ impl PrasastiDocument {
         if op == NSSaveOperationType::AutosaveElsewhereOperation && self.fileURL().is_some() {
             return self.write_draft(move |err| handler.call((err,)));
         }
-        if matches!(op, NSSaveOperationType::SaveOperation | NSSaveOperationType::SaveAsOperation) {
-            // A rebase failure never blocks the save; it then writes the text unchanged.
-            guarded(|| self.rebase_images(url));
-        }
+        // A rebase failure never blocks the save; it then writes the text unchanged.
+        let rebased = matches!(op, NSSaveOperationType::SaveOperation | NSSaveOperationType::SaveAsOperation)
+            .then(|| guarded(|| self.rebase_images(url)).flatten())
+            .flatten();
+        let defer = rebased.is_some();
         let this = self.retain();
         let done = RcBlock::new(move |err: *mut NSError| {
             if err.is_null() {
@@ -418,24 +430,40 @@ impl PrasastiDocument {
             } else {
                 // Nothing was written: the snapshot must not read as in flight.
                 this.ivars().pending.take();
+                if let Some(r) = &rebased {
+                    guarded(|| this.unrebase(r));
+                }
             }
             handler.call((err,));
         });
-        unsafe { msg_send![super(self), saveToURL: url, ofType: kind, forSaveOperation: op, completionHandler: &*done] }
+        if !defer {
+            return unsafe { msg_send![super(self), saveToURL: url, ofType: kind, forSaveOperation: op, completionHandler: &*done] };
+        }
+        // NSDocument counts the rebase's undo group on a later run-loop turn;
+        // saving first would leave the saved document marked edited.
+        let (this, url, kind) = (self.retain(), url.retain(), kind.copy());
+        self.ivars().deferred_saves.borrow_mut().push(Box::new(move || unsafe {
+            msg_send![super(&*this), saveToURL: &*url, ofType: &*kind, forSaveOperation: op, completionHandler: &*done]
+        }));
+        let modes = NSArray::from_slice(&[unsafe { objc2_foundation::NSRunLoopCommonModes }]);
+        // SAFETY: `prasastiContinueSaves` is a no-argument void method of ours.
+        unsafe {
+            let _: () = msg_send![self, performSelector: sel!(prasastiContinueSaves), withObject: None::<&AnyObject>, afterDelay: 0.0f64, inModes: &*modes];
+        }
     }
 
     /// Before a Save or Save As into another folder: copies this document's
     /// images next to `url` and makes image paths relative to its folder, as
     /// one undo step. The save that follows writes the editor text, so it
     /// includes this edit.
-    fn rebase_images(&self, url: &NSURL) {
-        let Some(editor) = self.editor() else { return };
-        let Some(target) = url.path().map(|p| PathBuf::from(p.to_string())) else { return };
-        let Some(new_dir) = target.parent() else { return };
+    fn rebase_images(&self, url: &NSURL) -> Option<Rebased> {
+        let editor = self.editor()?;
+        let target = PathBuf::from(url.path()?.to_string());
+        let new_dir = target.parent()?;
         let old = self.path().map(PathBuf::from);
         let old_dir = old.as_deref().and_then(Path::parent);
         if old_dir == Some(new_dir) {
-            return;
+            return None;
         }
         let w = |p: &Path| p.to_string_lossy().encode_utf16().collect::<Vec<u16>>();
         let (old_w, new_w) = (old_dir.map(w), w(new_dir));
@@ -454,16 +482,39 @@ impl PrasastiDocument {
         {
             status.flash(&errors.join("; "));
         }
-        let Some(edit) = prasasti_core::images::rebase(&text, old_w.as_deref(), &new_w, |p| map.get(p).cloned()) else { return };
-        // The user's selection, not the edit's caret, shifted if it lay after the edit.
-        let sel = editor.selectedRange();
-        editor.apply_edit(&edit);
-        let delta = edit.replacement.encode_utf16().count() as isize - edit.range.len() as isize;
-        let len = editor.string().length();
-        let loc = if sel.location >= edit.range.end { sel.location.saturating_add_signed(delta) } else { sel.location }.min(len);
-        editor.setSelectedRange(NSRange::new(loc, sel.length.min(len - loc)));
-        if let Some(undo) = editor.undoManager() {
-            undo.setActionName(ns_string!("Update Image Paths"));
+        let copies: Vec<PathBuf> = map.values().map(|v| PathBuf::from(String::from_utf16_lossy(v))).collect();
+        let Some(edit) = prasasti_core::images::rebase(&text, old_w.as_deref(), &new_w, |p| map.get(p).cloned()) else {
+            remove_copies(&copies);
+            return None;
+        };
+        let new_len = edit.replacement.encode_utf16().count();
+        let r = Rebased { start: edit.range.start, old_len: edit.range.len(), new_len, copies };
+        let undo = editor.undoManager();
+        // Its own top-level group, closed now, so the change count counts it
+        // before the save's token is taken: the saved document is clean.
+        let by_event = undo.as_ref().is_some_and(|u| u.groupsByEvent());
+        if let Some(u) = &undo {
+            // Not by event: the run-loop group would wrap ours and close after the save started.
+            u.setGroupsByEvent(false);
+            u.beginUndoGrouping();
+        }
+        keep_selection(&editor, r.start + r.old_len, r.new_len as isize - r.old_len as isize, || editor.apply_edit(&edit));
+        if let Some(u) = &undo {
+            u.setActionName(ns_string!("Update Image Paths"));
+            u.endUndoGrouping();
+            u.setGroupsByEvent(by_event);
+        }
+        Some(r)
+    }
+
+    /// After a failed save: undoes the rebase, if nothing was done after it,
+    /// and deletes the copies it made.
+    fn unrebase(&self, r: &Rebased) {
+        remove_copies(&r.copies);
+        let Some(editor) = self.editor() else { return };
+        let Some(undo) = editor.undoManager() else { return };
+        if undo.canUndo() && undo.undoActionName().to_string() == "Update Image Paths" {
+            keep_selection(&editor, r.start + r.new_len, r.old_len as isize - r.new_len as isize, || undo.undo());
         }
     }
 
@@ -827,6 +878,31 @@ impl PrasastiDocument {
     pub fn editor(&self) -> Option<Retained<EditorView>> {
         self.ivars().editor.borrow().clone()
     }
+}
+
+/// A rebase applied before a save, to undo if the save fails.
+struct Rebased {
+    start: usize,
+    old_len: usize,
+    new_len: usize,
+    /// The asset copies this save created.
+    copies: Vec<PathBuf>,
+}
+
+fn remove_copies(copies: &[PathBuf]) {
+    for c in copies {
+        let _ = std::fs::remove_file(c);
+    }
+}
+
+/// Runs `f`, a replacement ending at `end` that changes the length by `delta`,
+/// keeping the user's selection (shifted when it lay after the change).
+fn keep_selection(editor: &EditorView, end: usize, delta: isize, f: impl FnOnce()) {
+    let sel = editor.selectedRange();
+    f();
+    let len = editor.string().length();
+    let loc = if sel.location >= end { sel.location.saturating_add_signed(delta) } else { sel.location }.min(len);
+    editor.setSelectedRange(NSRange::new(loc, sel.length.min(len - loc)));
 }
 
 fn frame_name() -> &'static NSString {

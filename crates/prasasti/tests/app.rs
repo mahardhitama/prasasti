@@ -2091,13 +2091,18 @@ fn kitchen_sink_lines_fit_column() {
 
 /// `saveToURL:ofType:forSaveOperation:` to `path`; waits and asserts success.
 fn save_op(doc: &PrasastiDocument, path: &std::path::Path, op: objc2_app_kit::NSSaveOperationType) {
+    assert!(try_save_op(doc, path, op), "save succeeds");
+}
+
+/// `saveToURL:ofType:forSaveOperation:` to `path`; waits, true if it succeeded.
+fn try_save_op(doc: &PrasastiDocument, path: &std::path::Path, op: objc2_app_kit::NSSaveOperationType) -> bool {
     let url = NSURL::fileURLWithPath(&NSString::from_str(path.to_str().unwrap()));
     let failed = std::rc::Rc::new(std::cell::Cell::new(None));
     let f = failed.clone();
     let done = block2::RcBlock::new(move |e: *mut NSError| f.set(Some(!e.is_null())));
     doc.saveToURL_ofType_forSaveOperation_completionHandler(&url, ns_string!(MD), op, &done);
     wait_until(|| failed.get().is_some());
-    assert_eq!(failed.get(), Some(false), "save succeeds");
+    failed.get() == Some(false)
 }
 
 fn first_save_rebases_images() {
@@ -2115,6 +2120,8 @@ fn first_save_rebases_images() {
         assert_eq!(doc.text().to_string(), "hi\n![](img.png)\n");
         assert_eq!(std::fs::read_to_string(dir.join("doc.md")).unwrap(), "hi\n![](img.png)\n");
         assert_eq!(e.selectedRange(), NSRange::new(1, 0), "the caret before the image stays put");
+        ui::pump(0.05);
+        assert!(!doc.isDocumentEdited(), "the rebase is part of what was saved");
         assert_eq!(e.undoManager().unwrap().undoMenuItemTitle().to_string(), "Undo Update Image Paths");
         ui::shortcut(&document_window(&doc), "z", CMD);
         assert_eq!(doc.text().to_string(), before);
@@ -2155,6 +2162,56 @@ fn carry_never_overwrites() {
         assert_eq!(std::fs::read(b.join("new.assets/p.png")).unwrap(), b"other");
         assert_eq!(std::fs::read(b.join("new.assets/p-2.png")).unwrap(), b"mine");
         assert_eq!(fx.text(), "![](new.assets/p-2.png)\n");
+    });
+}
+
+fn set_mode(p: &std::path::Path, mode: u32) {
+    use std::os::unix::fs::PermissionsExt;
+    std::fs::set_permissions(p, std::fs::Permissions::from_mode(mode)).unwrap();
+}
+
+/// Save As into a folder that can't take the file: the rebase and its copies are undone.
+fn failed_save_reverts_rebase() {
+    on_disk("rebase-fail", "a
+", |fx| {
+        let dir = fx.path.parent().unwrap();
+        std::fs::create_dir_all(dir.join("doc.assets")).unwrap();
+        std::fs::write(dir.join("doc.assets/p.png"), b"mine").unwrap();
+        fx.doc.editor().unwrap().setString(ns_string!("![](doc.assets/p.png)\n"));
+        fx.type_text("x");
+        let before = fx.text();
+        // The assets folder takes the copy; the read-only folder refuses the document.
+        let b = dir.join("b");
+        std::fs::create_dir_all(b.join("new.assets")).unwrap();
+        set_mode(&b, 0o555);
+        let ok = try_save_op(&fx.doc, &b.join("new.md"), objc2_app_kit::NSSaveOperationType::SaveAsOperation);
+        set_mode(&b, 0o755);
+        assert!(!ok, "the save fails");
+        assert_eq!(fx.text(), before);
+        assert_eq!(std::fs::read_dir(b.join("new.assets")).unwrap().count(), 0, "no stray copies");
+        assert!(fx.doc.isDocumentEdited());
+        assert_eq!(fx.doc.fileURL().unwrap().path().unwrap().to_string(), fx.path.to_str().unwrap());
+    });
+}
+
+/// An image that can't be copied keeps pointing at its original; the save goes ahead.
+fn failed_copy_keeps_original_link() {
+    on_disk("copy-fail", "a
+", |fx| {
+        let src = fx.path.parent().unwrap().join("doc.assets/p.png");
+        std::fs::create_dir_all(src.parent().unwrap()).unwrap();
+        std::fs::write(&src, b"mine").unwrap();
+        set_mode(&src, 0o000);
+        fx.doc.editor().unwrap().setString(ns_string!("![](doc.assets/p.png)\n"));
+        let b = fx.path.parent().unwrap().join("b");
+        std::fs::create_dir_all(&b).unwrap();
+        let ok = try_save_op(&fx.doc, &b.join("new.md"), objc2_app_kit::NSSaveOperationType::SaveAsOperation);
+        let status = fx.status();
+        set_mode(&src, 0o644);
+        assert!(ok, "the save goes ahead");
+        assert_eq!(fx.text(), "![](../doc.assets/p.png)\n");
+        assert!(!b.join("new.assets/p.png").exists());
+        assert!(status.starts_with("Couldn't copy p.png: "), "{status}");
     });
 }
 
@@ -2663,6 +2720,8 @@ fn main() {
         ("save_as_moves_relative_and_carries_assets", save_as_moves_relative_and_carries_assets),
         ("carry_never_overwrites", carry_never_overwrites),
         ("autosave_never_rebases", autosave_never_rebases),
+        ("failed_save_reverts_rebase", failed_save_reverts_rebase),
+        ("failed_copy_keeps_original_link", failed_copy_keeps_original_link),
         ("save_to_never_rebases", save_to_never_rebases),
     ];
     let mut failed = 0;
