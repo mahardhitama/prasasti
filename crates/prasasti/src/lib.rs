@@ -2,6 +2,8 @@ pub mod app_delegate;
 pub mod document;
 pub mod editor;
 pub mod menu;
+pub mod styler;
+pub mod theme;
 pub mod util;
 
 use objc2::ClassType;

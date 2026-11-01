@@ -1,9 +1,23 @@
 //! Main-thread AppKit tests (harness = false: `main` runs on the main thread).
 
+mod ui;
+
+use std::time::Instant;
+
 use objc2::rc::{Retained, autoreleasepool};
-use objc2_app_kit::{NSApplication, NSDocument, NSTextInputClient};
-use objc2_foundation::{MainThreadMarker, NSData, NSError, NSNotFound, NSRange, ns_string};
+use objc2::runtime::AnyObject;
+use objc2_app_kit::{
+    NSApplication, NSDocument, NSEventModifierFlags, NSFont, NSFontManager, NSFontTraitMask,
+    NSGlyphProperty, NSTextInputClient, NSTextStorage,
+};
+use objc2_foundation::{
+    MainThreadMarker, NSData, NSError, NSNotFound, NSPoint, NSRange, NSRect, NSSize, NSString,
+    ns_string,
+};
 use prasasti::document::{HoldReason, PrasastiDocument};
+use prasasti::editor::{EditorView, make_editor};
+use prasasti::styler::{Styler, hidden_key};
+use prasasti::theme::{base_font, palette};
 
 const MD: &str = "net.daringfireball.markdown";
 
@@ -72,6 +86,125 @@ fn window_shows_text_and_typing_edits() {
     d.close();
 }
 
+fn editor_with(text: &str) -> Retained<EditorView> {
+    let e = make_editor(NSRect::new(NSPoint::new(0.0, 0.0), NSSize::new(600.0, 400.0)));
+    e.setString(&NSString::from_str(text));
+    e
+}
+
+fn styled(text: &str, caret: usize) -> Retained<EditorView> {
+    let e = editor_with(text);
+    Styler::default().restyle_all(e.storage(), &base_font(), &palette(false), caret);
+    e
+}
+
+fn attr(s: &NSTextStorage, key: &NSString, i: usize) -> Option<Retained<AnyObject>> {
+    // SAFETY: a null effective-range pointer is allowed.
+    unsafe { s.attribute_atIndex_effectiveRange(key, i, std::ptr::null_mut()) }
+}
+
+fn hidden(s: &NSTextStorage, i: usize) -> bool {
+    attr(s, hidden_key(), i).is_some()
+}
+
+fn is_bold(s: &NSTextStorage, i: usize) -> bool {
+    let font = attr(s, unsafe { objc2_app_kit::NSFontAttributeName }, i)
+        .and_then(|f| f.downcast::<NSFont>().ok())
+        .expect("font attribute");
+    NSFontManager::sharedFontManager(mtm()).traitsOfFont(&font).contains(NSFontTraitMask::BoldFontMask)
+}
+
+fn has_code_bg(s: &NSTextStorage, i: usize) -> bool {
+    attr(s, unsafe { objc2_app_kit::NSBackgroundColorAttributeName }, i).is_some()
+}
+
+fn fence_settles() {
+    let e = editor_with("a\n```\nb **c**\n");
+    let s = e.storage();
+    assert!(has_code_bg(s, 6) && !is_bold(s, 10), "inside the fence: code");
+    // A closing fence right after the opening one turns "b **c**" back into prose.
+    s.replaceCharactersInRange_withString(NSRange::new(6, 0), ns_string!("```\n"));
+    assert_eq!(e.string().to_string(), "a\n```\n```\nb **c**\n");
+    assert!(!has_code_bg(s, 10), "b no longer code");
+    assert!(is_bold(s, 14), "c bold");
+    assert!(hidden(s, 12) && hidden(s, 13) && hidden(s, 15) && hidden(s, 16), "markers hidden");
+}
+
+fn hidden_markers_have_null_glyphs() {
+    let e = styled("x **b** y", 0);
+    let lm = unsafe { e.layoutManager() }.expect("layout manager");
+    let prop = |c| lm.propertyForGlyphAtIndex(lm.glyphIndexForCharacterAtIndex(c));
+    for c in [2, 3, 5, 6] {
+        assert!(prop(c).contains(NSGlyphProperty::Null), "char {c} null glyph");
+    }
+    assert!(!prop(4).contains(NSGlyphProperty::Null), "char 4 visible");
+}
+
+fn markers_show_at_caret() {
+    let (win, e) = ui::window_with("x **b** y");
+    e.setSelectedRange(NSRange::new(0, 0));
+    ui::pump(0.0);
+    assert!((2..7).any(|i| hidden(e.storage(), i)), "hidden with caret at 0");
+    for _ in 0..4 {
+        ui::key(&win, ui::RIGHT, NSEventModifierFlags::empty());
+    }
+    // TextKit steps over null glyphs, so from 1 the caret lands inside the markup.
+    assert!((2..=7).contains(&e.selectedRange().location));
+    assert!(!(2..7).any(|i| hidden(e.storage(), i)), "shown with caret inside");
+    for _ in 0..4 {
+        ui::key(&win, ui::RIGHT, NSEventModifierFlags::empty());
+    }
+    assert!(e.selectedRange().location >= 8);
+    assert!([2, 3, 5, 6].iter().all(|&i| hidden(e.storage(), i)), "hidden again");
+    win.close();
+}
+
+/// Typed text is styled through the storage delegate, not just on load.
+fn typing_styles_live() {
+    let (win, e) = ui::window_with("");
+    ui::type_text(&win, "a **b** c");
+    assert_eq!(e.string().to_string(), "a **b** c");
+    let s = e.storage();
+    assert!(is_bold(s, 4));
+    assert!([2, 3, 5, 6].iter().all(|&i| hidden(s, i)), "markers hidden after caret left");
+    win.close();
+}
+
+fn styles_bold_after_emoji() {
+    let e = styled("😀 **b**", 0);
+    assert!(is_bold(e.storage(), 5));
+    assert!(!is_bold(e.storage(), 2));
+}
+
+fn large_doc() -> String {
+    (0..30_000).map(|n| format!("line {n} with **bold** and a [link](u)\n")).collect()
+}
+
+/// Debug builds are several times slower than release.
+const PERF_LIMIT: f64 = if cfg!(debug_assertions) { 5.0 } else { 1.0 };
+
+fn restyles_2mb_under_1s() {
+    let e = editor_with(&large_doc());
+    let t = Instant::now();
+    Styler::default().restyle_all(e.storage(), &base_font(), &palette(false), 0);
+    let secs = t.elapsed().as_secs_f64();
+    println!("    restyle_all of {} UTF-16 units: {secs:.3}s", e.string().length());
+    assert!(secs < PERF_LIMIT, "{secs}s");
+}
+
+fn keystroke_in_large_doc_restyles_locally() {
+    let e = editor_with(&large_doc());
+    let s = e.storage();
+    let (font, pal) = (base_font(), palette(false));
+    let mut st = Styler::default();
+    st.restyle_all(s, &font, &pal, 0);
+    let mid = e.string().length() / 2;
+    s.replaceCharactersInRange_withString(NSRange::new(mid, 0), ns_string!("x"));
+    let r = st.restyle_edit(s, &font, &pal, NSRange::new(mid, 1), mid + 1);
+    assert!(r.length < 200, "restyled {r:?}");
+    assert!(r.location <= mid && mid < r.location + r.length);
+}
+
 fn main() {
     let _app = NSApplication::sharedApplication(mtm());
     let tests: &[(&str, fn())] = &[
@@ -80,6 +213,13 @@ fn main() {
         ("crlf_holds_autosave", crlf_holds_autosave),
         ("writes_utf8_lf", writes_utf8_lf),
         ("window_shows_text_and_typing_edits", window_shows_text_and_typing_edits),
+        ("fence_settles", fence_settles),
+        ("hidden_markers_have_null_glyphs", hidden_markers_have_null_glyphs),
+        ("markers_show_at_caret", markers_show_at_caret),
+        ("typing_styles_live", typing_styles_live),
+        ("styles_bold_after_emoji", styles_bold_after_emoji),
+        ("restyles_2mb_under_1s", restyles_2mb_under_1s),
+        ("keystroke_in_large_doc_restyles_locally", keystroke_in_large_doc_restyles_locally),
     ];
     let mut failed = 0;
     for (name, f) in tests {

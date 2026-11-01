@@ -4,17 +4,17 @@ use objc2::rc::Retained;
 use objc2::runtime::{AnyObject, Bool};
 use objc2::{DefinedClass, MainThreadOnly, define_class, msg_send};
 use objc2_app_kit::{
-    NSAutoresizingMaskOptions, NSBackingStoreType, NSDocument, NSScrollView, NSWindow,
+    NSBackingStoreType, NSDocument, NSWindow,
     NSWindowController, NSWindowStyleMask,
 };
 use objc2_foundation::{
-    MainThreadMarker, NSCocoaErrorDomain, NSData, NSDictionary, NSError,
+    MainThreadMarker, NSCocoaErrorDomain, NSCopying, NSData, NSDictionary, NSError,
     NSFileReadInapplicableStringEncodingError, NSLocalizedDescriptionKey, NSObjectProtocol,
     NSPoint, NSRect, NSSize, NSString, ns_string,
 };
 use prasasti_core::file::{decode, normalize_newlines, saves_unchanged};
 
-use crate::editor::{EditorView, make_editor};
+use crate::editor::{EditorView, editor_in_scroll};
 use crate::util::guarded;
 
 /// Why autosave must not write the file right now.
@@ -70,15 +70,8 @@ define_class!(
             };
             unsafe { window.setReleasedWhenClosed(false) };
 
-            let scroll = NSScrollView::initWithFrame(NSScrollView::alloc(mtm), frame);
-            scroll.setHasVerticalScroller(true);
-            scroll.setAutoresizingMask(
-                NSAutoresizingMaskOptions::ViewWidthSizable
-                    | NSAutoresizingMaskOptions::ViewHeightSizable,
-            );
-            let editor = make_editor(NSRect::new(NSPoint::new(0.0, 0.0), scroll.contentSize()));
+            let (scroll, editor) = editor_in_scroll(frame);
             editor.setString(&self.ivars().text.borrow());
-            scroll.setDocumentView(Some(&editor));
             window.setContentView(Some(&scroll));
             window.makeFirstResponder(Some(&editor));
 
@@ -86,6 +79,7 @@ define_class!(
                 NSWindowController::alloc(mtm),
                 Some(&window),
             );
+            window.center();
             controller.setWindowFrameAutosaveName(ns_string!("PrasastiMain"));
             self.addWindowController(&controller);
             *self.ivars().editor.borrow_mut() = Some(editor);
@@ -143,7 +137,8 @@ impl PrasastiDocument {
     /// The current text: the editor's when a window exists, else the loaded text.
     pub fn text(&self) -> Retained<NSString> {
         match &*self.ivars().editor.borrow() {
-            Some(editor) => editor.string(),
+            // A copy: the editor's string is its live, mutable backing store.
+            Some(editor) => editor.string().copy(),
             None => self.ivars().text.borrow().clone(),
         }
     }
