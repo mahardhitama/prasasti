@@ -13,8 +13,8 @@ use objc2::runtime::{AnyObject, ProtocolObject};
 use objc2::{AnyThread, DefinedClass, MainThreadOnly, define_class, msg_send, sel};
 use objc2_app_kit::{NSEvent, NSEventModifierFlags, NSMenuItem, NSResponder, NSView, NSWorkspace};
 use objc2_foundation::{
-    MainThreadMarker, NSBundle, NSData, NSDate, NSDictionary, NSError, NSHTTPURLResponse, NSObject,
-    NSObjectProtocol, NSRect, NSRunLoop, NSString, NSURL, ns_string,
+    MainThreadMarker, NSArray, NSBundle, NSData, NSDate, NSDictionary, NSError, NSHTTPURLResponse, NSObject,
+    NSObjectProtocol, NSRect, NSRunLoop, NSString, NSURL, NSURLErrorBadURL, NSURLErrorDomain, ns_string,
 };
 use objc2_web_kit::{
     WKNavigation, WKNavigationAction, WKNavigationActionPolicy, WKNavigationDelegate, WKNavigationType,
@@ -40,7 +40,38 @@ const IMAGE_TYPES: &[(&str, &str)] = &[
     ("bmp", "image/bmp"),
     ("avif", "image/avif"),
 ];
-const APP_TYPES: &[(&str, &str)] = &[("js", "text/javascript"), ("css", "text/css"), ("woff2", "font/woff2")];
+const APP_TYPES: &[(&str, &str)] =
+    &[("js", "text/javascript"), ("css", "text/css"), ("woff2", "font/woff2"), ("ttf", "font/ttf")];
+
+/// The bundled editor font, served to the page under its own name: WebKit's
+/// web content process cannot see fonts registered only for the app.
+const BUNDLED_FONT: &str = "Prasasti JetBrains Mono";
+const BUNDLED_FACES: [(&str, &str, &str); 4] = [
+    ("Regular", "normal", "normal"),
+    ("Bold", "bold", "normal"),
+    ("Italic", "normal", "italic"),
+    ("BoldItalic", "bold", "italic"),
+];
+
+/// Raw HTML with every `src=file://…` (any quoting) pointing at `prasasti://file/…`.
+fn rewrite_raw_src(html: &str) -> String {
+    let lower = html.to_ascii_lowercase();
+    let mut out = String::with_capacity(html.len());
+    let mut last = 0;
+    for (i, _) in lower.match_indices("src=") {
+        let mut at = i + "src=".len();
+        if lower[at..].starts_with(['"', '\'']) {
+            at += 1;
+        }
+        if lower[at..].starts_with("file://") {
+            out.push_str(&html[last..at]);
+            out.push_str("prasasti://file");
+            last = at + "file://".len();
+        }
+    }
+    out.push_str(&html[last..]);
+    out
+}
 
 /// The whole page: CSP, both palettes, the column, the app's scripts and the
 /// Markdown body. `file://` image URLs become `prasasti://file/…`.
@@ -73,6 +104,8 @@ pub fn page_html(markdown: &str, font_family: &str, font_px: f64, columns: usize
                 let dest_url = format!("prasasti://file{}", &dest_url["file://".len()..]).into();
                 events.push(Event::Start(Tag::Image { link_type, dest_url, title, id }));
             }
+            Event::Html(h) => events.push(Event::Html(rewrite_raw_src(&h).into())),
+            Event::InlineHtml(h) => events.push(Event::InlineHtml(rewrite_raw_src(&h).into())),
             e => events.push(e),
         }
     }
@@ -80,6 +113,14 @@ pub fn page_html(markdown: &str, font_family: &str, font_px: f64, columns: usize
     html::push_html(&mut body, events.into_iter());
     // A CSS string inside <style>: no quote, backslash or `<` (`</style>`) gets out.
     let family = font_family.replace('\\', "\\\\").replace('\'', "\\'").replace('<', "\\3c ");
+    let (faces, first) = if font_family == crate::settings::DEFAULT_FAMILY {
+        let faces = BUNDLED_FACES.iter().map(|(file, weight, style)| {
+            format!("@font-face {{ font-family: '{BUNDLED_FONT}'; src: url(prasasti://app/fonts/JetBrainsMono-{file}.ttf); font-weight: {weight}; font-style: {style}; }}\n")
+        });
+        (faces.collect(), format!("'{BUNDLED_FONT}', "))
+    } else {
+        (String::new(), String::new())
+    };
     let vars = |dark| {
         let names = ["bg", "text", "accent", "marker", "code-bg", "selection", "search", "current"];
         let hex = crate::theme::hex(dark);
@@ -93,9 +134,9 @@ pub fn page_html(markdown: &str, font_family: &str, font_px: f64, columns: usize
 <link rel="stylesheet" href="prasasti://app/katex/katex.min.css">
 <link rel="stylesheet" href="prasasti://app/preview.css">
 <style>
-:root {{ {light} }}
+{faces}:root {{ {light} }}
 @media (prefers-color-scheme: dark) {{ :root {{ {dark} }} }}
-body {{ max-width: {columns}ch; margin: 0 auto; font-family: '{family}', ui-monospace, monospace; font-size: {font_px}px; }}
+body {{ max-width: {columns}ch; margin: 0 auto; font-family: {first}'{family}', ui-monospace, monospace; font-size: {font_px}px; }}
 </style>
 <script src="prasasti://app/katex/katex.min.js"></script>
 <script type="module" src="prasasti://app/preview.js"></script>
@@ -223,8 +264,10 @@ impl SchemeHandler {
     /// and fonts from `prasasti://app` are cross-origin loads.
     fn serve(&self, task: &ProtocolObject<dyn WKURLSchemeTask>) {
         // SAFETY: a plain getter.
-        let Some(url) = unsafe { task.request() }.URL() else { return };
+        let Some(url) = unsafe { task.request() }.URL() else { return fail(task) };
         let s = url.absoluteString().map(|s| s.to_string()).unwrap_or_default();
+        // shortcut: a synchronous read on the main thread (small local files);
+        // move it to a background queue if large images ever stall the UI.
         let found = resolve(&s, self.ivars()).and_then(|(p, ty)| Some((std::fs::read(p).ok()?, ty)));
         let (status, ty, bytes) = match found {
             Some((bytes, ty)) => (200, ty, bytes),
@@ -241,7 +284,7 @@ impl SchemeHandler {
             Some(ns_string!("HTTP/1.1")),
             Some(&headers),
         ) else {
-            return;
+            return fail(task);
         };
         // SAFETY: response, data, finish: once each, in order, on a live task.
         unsafe {
@@ -252,13 +295,22 @@ impl SchemeHandler {
     }
 }
 
+/// Ends a task that cannot be answered, so the page never waits on it.
+fn fail(task: &ProtocolObject<dyn WKURLSchemeTask>) {
+    // SAFETY: a constant domain; the task is live and not yet answered.
+    unsafe {
+        let error = NSError::errorWithDomain_code_userInfo(NSURLErrorDomain, NSURLErrorBadURL, None);
+        task.didFailWithError(&error);
+    }
+}
+
 pub struct Ivars {
     editor: Weak<EditorView>,
     _handler: Retained<SchemeHandler>,
     /// The last page and base URL loaded.
     html: RefCell<String>,
     base: RefCell<String>,
-    /// Loads started by `load` whose navigation is still to be allowed.
+    /// 1 while the newest `load`'s navigation is still to be allowed.
     pending: Cell<u32>,
     /// The error page is showing (so its own failure does not loop).
     failed: Cell<bool>,
@@ -369,7 +421,8 @@ impl PreviewView {
     fn load(&self, html: &str, base: &str) {
         let iv = self.ivars();
         *iv.base.borrow_mut() = base.into();
-        iv.pending.set(iv.pending.get() + 1);
+        // Only the newest load may navigate; a superseded one leaves no allowance.
+        iv.pending.set(1);
         let url = NSURL::URLWithString(&NSString::from_str(base));
         // SAFETY: a string and an optional base URL.
         let _ = unsafe { self.loadHTMLString_baseURL(&NSString::from_str(html), url.as_deref()) };
@@ -438,18 +491,43 @@ impl PreviewView {
     }
 }
 
-/// Opens a clicked link in its own app: web and mail links as they are,
-/// `prasasti://file/…` as the `file://` URL it stands for.
+/// Types that run something when opened, whatever their permissions.
+const LAUNCHERS: &[&str] = &[
+    "app", "command", "sh", "bash", "zsh", "csh", "ksh", "tool", "terminal", "workflow", "action", "pkg", "mpkg",
+    "dmg", "scpt", "scptd", "applescript", "jar", "webloc", "inetloc", "fileloc", "url", "prefpane", "saver",
+    "qlgenerator", "kext", "mobileconfig", "py", "rb", "pl", "osax", "plugin", "bundle", "framework",
+];
+
+/// Whether a linked file may be opened in its app: a regular file, not
+/// executable, not a launcher type. Anything else is only shown in Finder.
+fn opens_directly(p: &Path) -> bool {
+    use std::os::unix::fs::PermissionsExt;
+    let Ok(meta) = std::fs::metadata(p) else { return false };
+    let ext = p.extension().and_then(|e| e.to_str()).unwrap_or_default().to_ascii_lowercase();
+    meta.is_file() && meta.permissions().mode() & 0o111 == 0 && !LAUNCHERS.contains(&ext.as_str())
+}
+
+/// Opens a clicked link outside: web and mail links in their apps; a local
+/// file (`prasasti://file/…`) in its app only when it cannot launch
+/// anything, otherwise revealed in Finder.
 fn open_outside(url: &str) {
-    let target = if ["http://", "https://", "mailto:"].iter().any(|p| url.starts_with(p)) {
-        url.to_string()
-    } else if let Some(rest) = url.strip_prefix("prasasti://file/") {
-        format!("file:///{rest}")
-    } else {
+    let ws = NSWorkspace::sharedWorkspace();
+    if ["http://", "https://", "mailto:"].iter().any(|p| url.starts_with(p)) {
+        if let Some(u) = NSURL::URLWithString(&NSString::from_str(url)) {
+            ws.openURL(&u);
+        }
         return;
-    };
-    if let Some(u) = NSURL::URLWithString(&NSString::from_str(&target)) {
-        NSWorkspace::sharedWorkspace().openURL(&u);
+    }
+    let Some(rest) = url.strip_prefix("prasasti://file/") else { return };
+    let Some(path) = decode(rest.split(['?', '#']).next().unwrap_or_default()) else { return };
+    let mut abs = OsString::from("/");
+    abs.push(path);
+    let path = PathBuf::from(abs);
+    let Some(u) = path.to_str().map(|p| NSURL::fileURLWithPath(&NSString::from_str(p))) else { return };
+    if opens_directly(&path) {
+        ws.openURL(&u);
+    } else {
+        ws.activateFileViewerSelectingURLs(&NSArray::from_retained_slice(&[u]));
     }
 }
 
@@ -498,6 +576,44 @@ mod tests {
     #[test]
     fn file_url_image_rewritten() {
         assert!(page("![a](file:///x/y.png)").contains(r#"src="prasasti://file/x/y.png""#));
+    }
+
+    #[test]
+    fn raw_html_file_image_rewritten() {
+        let p = page("<img src=\"file:///x/y.png\">\n\nInline <img SRC='file:///a/b.png'> here.");
+        assert!(p.contains(r#"<img src="prasasti://file/x/y.png">"#), "{p}");
+        assert!(p.contains("<img SRC='prasasti://file/a/b.png'>"), "{p}");
+    }
+
+    #[test]
+    fn bundled_font_served_to_the_page() {
+        let p = page("x");
+        assert!(p.contains("url(prasasti://app/fonts/JetBrainsMono-BoldItalic.ttf)"), "{p}");
+        assert!(p.contains("font-family: 'Prasasti JetBrains Mono', 'JetBrains Mono',"), "{p}");
+        assert!(!page_html("x", "Menlo", 15.0, 80).contains("@font-face"));
+        assert_eq!(resolve("prasasti://app/fonts/JetBrainsMono-Regular.ttf", Path::new("/r")).map(|r| r.1), Some("font/ttf"));
+    }
+
+    #[test]
+    fn only_plain_files_open_directly() {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = std::env::temp_dir().join(format!("prasasti-open-{}", std::process::id()));
+        std::fs::create_dir_all(dir.join("A.app")).unwrap();
+        let file = |name: &str, mode: u32| {
+            let p = dir.join(name);
+            std::fs::write(&p, "x").unwrap();
+            std::fs::set_permissions(&p, std::fs::Permissions::from_mode(mode)).unwrap();
+            p
+        };
+        assert!(opens_directly(&file("a.png", 0o644)));
+        assert!(opens_directly(&file("notes.md", 0o644)));
+        assert!(!opens_directly(&file("run.png", 0o755)), "executable bit");
+        assert!(!opens_directly(&file("x.command", 0o644)));
+        assert!(!opens_directly(&file("y.PKG", 0o644)));
+        assert!(!opens_directly(&dir.join("A.app")));
+        assert!(!opens_directly(&dir), "directory");
+        assert!(!opens_directly(&dir.join("missing.png")));
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]

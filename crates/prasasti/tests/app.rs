@@ -2264,6 +2264,13 @@ fn kitchen_sink_renders() {
     assert_eq!(js(&format!("String({local}.length)")), "4");
     assert_eq!(js(&format!("{local}.filter(i => i.naturalWidth === 0).map(i => i.src).join(' ')")), "", "every local image loads");
     assert_eq!(js("typeof window.__xss"), "undefined", "inline script and onerror never run");
+    // The served copy, not a system-wide install: only it has this family name.
+    wait_for_js(
+        &web,
+        "String([...document.fonts].some(f => f.family.replace(/[\"']/g, '') === 'Prasasti JetBrains Mono' && f.status === 'loaded'))",
+        "true",
+        5.0,
+    );
     doc.close();
     let _ = std::fs::remove_dir_all(&dir);
 }
@@ -2281,6 +2288,23 @@ fn preview_never_navigates_away() {
     let href = web.eval("location.href", 1.0).unwrap_or_default();
     assert!(href.starts_with("prasasti://file/"), "{href}");
     win.close();
+}
+
+fn image_beside_doc_in_odd_folder_loads() {
+    let dir = std::env::temp_dir().join(format!("prasasti a #%ü-{}", std::process::id()));
+    std::fs::create_dir_all(&dir).unwrap();
+    let fixture = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../fixtures/kitchen-sink/assets/logo.png");
+    std::fs::copy(fixture, dir.join("logo.png")).unwrap();
+    std::fs::write(dir.join("doc.md"), "![logo](logo.png)\n").unwrap();
+    let doc = disk_doc(&dir.join("doc.md"));
+    doc.makeWindowControllers();
+    let web = content_of(&document_window(&doc)).preview().expect("preview");
+    wait_for_js(&web, "String(document.images.length === 1 && document.images[0].complete)", "true", 10.0);
+    let width = web.eval("String(document.images[0].naturalWidth)", 1.0).unwrap_or_default();
+    let src = web.eval("document.images[0].src", 1.0).unwrap_or_default();
+    doc.close();
+    let _ = std::fs::remove_dir_all(&dir);
+    assert_ne!(width, "0", "{src}");
 }
 
 fn kitchen_sink_unchanged_after_open_close() {
@@ -2411,6 +2435,7 @@ fn main() {
         ("kitchen_sink_renders", kitchen_sink_renders),
         ("preview_never_navigates_away", preview_never_navigates_away),
         ("kitchen_sink_unchanged_after_open_close", kitchen_sink_unchanged_after_open_close),
+        ("image_beside_doc_in_odd_folder_loads", image_beside_doc_in_odd_folder_loads),
         ("frame_restored_exactly", frame_restored_exactly),
         ("second_window_cascades", second_window_cascades),
         ("last_closed_window_frame_is_stored", last_closed_window_frame_is_stored),
