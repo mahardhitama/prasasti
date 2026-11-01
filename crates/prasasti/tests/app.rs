@@ -1900,14 +1900,120 @@ fn window_min_width_follows_column() {
     fresh_defaults();
 }
 
+const FRAME_KEY: &str = "NSWindow Frame PrasastiMain";
+
+/// Closes every open document so each frame test starts with no document window.
+fn close_all_documents() {
+    for d in objc2_app_kit::NSDocumentController::sharedDocumentController(mtm()).documents().iter() {
+        d.close();
+    }
+    for w in NSApplication::sharedApplication(mtm()).windows().iter() {
+        if w.windowController().and_then(|c| unsafe { c.document() }).is_some() {
+            w.close();
+        }
+    }
+}
+
+fn document_window(doc: &PrasastiDocument) -> Retained<objc2_app_kit::NSWindow> {
+    doc.windowControllers().firstObject().and_then(|c| c.window()).expect("window")
+}
+
+fn disk_doc(path: &std::path::Path) -> Retained<PrasastiDocument> {
+    let url = NSURL::fileURLWithPath(&NSString::from_str(path.to_str().unwrap()));
+    let doc = PrasastiDocument::new(mtm());
+    doc.readFromURL_ofType_error(&url, ns_string!(MD)).expect("read");
+    doc.setFileURL(Some(&url));
+    doc.setFileType(Some(ns_string!(MD)));
+    doc
+}
+
+fn assert_frames_equal(a: NSRect, b: NSRect) {
+    let close = |x: f64, y: f64| (x - y).abs() <= 0.5;
+    assert!(
+        close(a.origin.x, b.origin.x) && close(a.origin.y, b.origin.y) && close(a.size.width, b.size.width) && close(a.size.height, b.size.height),
+        "{a:?} != {b:?}"
+    );
+}
+
+/// A frame well inside the main screen, above the column minimum, unlike the default.
+fn distinctive_frame() -> NSRect {
+    let v = objc2_app_kit::NSScreen::mainScreen(mtm()).expect("screen").visibleFrame();
+    NSRect::new(NSPoint::new(v.origin.x + 60.0, v.origin.y + 40.0), NSSize::new(v.size.width.min(1400.0) - 300.0, 520.0))
+}
+
+/// Opens `doc`'s window, returns its frame, sets `next`, and closes the
+/// document, as a user closing the window does. The pool drain releases the
+/// window, which frees its autosave name for the next open.
+fn open_resize_close(doc: Retained<PrasastiDocument>, next: NSRect) -> NSRect {
+    autoreleasepool(move |_| {
+        doc.makeWindowControllers();
+        let win = document_window(&doc);
+        // The first window must not be shifted by AppKit's cascade.
+        assert!(!doc.windowControllers().firstObject().expect("controller").shouldCascadeWindows());
+        let opened = win.frame();
+        win.setFrame_display(next, false);
+        doc.close();
+        opened
+    })
+}
+
+fn frame_restored_exactly() {
+    fresh_defaults();
+    close_all_documents();
+    let want = distinctive_frame();
+    let want2 = NSRect::new(NSPoint::new(want.origin.x + 30.0, want.origin.y + 20.0), NSSize::new(want.size.width - 40.0, 480.0));
+    // Untitled: set a frame, close, reopen.
+    open_resize_close(doc_from(b"one"), want);
+    assert_frames_equal(open_resize_close(doc_from(b"two"), want2), want);
+    // File-backed: opened from disk.
+    let dir = std::env::temp_dir().join(format!("prasasti-frame-{}", std::process::id()));
+    std::fs::create_dir_all(&dir).unwrap();
+    let path = dir.join("doc.md");
+    std::fs::write(&path, "disk").unwrap();
+    let opened = open_resize_close(disk_doc(&path), want);
+    let _ = std::fs::remove_dir_all(&dir);
+    assert_frames_equal(opened, want2);
+}
+
+fn second_window_cascades() {
+    fresh_defaults();
+    close_all_documents();
+    let a = doc_from(b"a");
+    a.makeWindowControllers();
+    let b = doc_from(b"b");
+    b.makeWindowControllers();
+    let (fa, fb) = (document_window(&a).frame(), document_window(&b).frame());
+    assert!(fa.origin.x != fb.origin.x || fa.origin.y != fb.origin.y, "{fa:?} == {fb:?}");
+    a.close();
+    b.close();
+}
+
+fn no_window_tabbing() {
+    let d = doc_from(b"x");
+    d.makeWindowControllers();
+    assert!(!objc2_app_kit::NSWindow::allowsAutomaticWindowTabbing(mtm()));
+    assert_eq!(document_window(&d).tabbingMode(), objc2_app_kit::NSWindowTabbingMode::Disallowed);
+    d.close();
+}
+
 fn restored_narrow_window_grows() {
     fresh_defaults();
-    // ui::window_with builds a 600-pt window; the content view sets the minimum when it moves in.
-    let (win, _e) = ui::window_with("x");
+    close_all_documents();
+    // A frame saved at 300 pt wide: the real restore path must grow it to the column.
+    let v = objc2_app_kit::NSScreen::mainScreen(mtm()).expect("screen").visibleFrame();
+    let d = doc_from(b"x");
+    d.makeWindowControllers();
+    let win = document_window(&d);
+    win.setFrame_display(NSRect::new(NSPoint::new(v.origin.x + 40.0, v.origin.y + 40.0), NSSize::new(300.0, 400.0)), false);
+    win.saveFrameUsingName(ns_string!("PrasastiMain"));
+    d.close();
+    let d = doc_from(b"y");
+    d.makeWindowControllers();
+    let win = document_window(&d);
     let content = win.contentRectForFrameRect(win.frame()).size.width;
-    assert!(win.contentMinSize().width > 600.0);
+    assert!(win.contentMinSize().width > 300.0);
     assert!(content >= win.contentMinSize().width, "{content} < {}", win.contentMinSize().width);
-    win.close();
+    d.close();
 }
 
 fn kitchen_sink_lines_fit_column() {
@@ -1919,6 +2025,9 @@ fn kitchen_sink_lines_fit_column() {
     let (lm, tc) = unsafe { (e.layoutManager().unwrap(), e.textContainer().unwrap()) };
     lm.ensureLayoutForTextContainer(&tc);
     let width = tc.size().width;
+    // Fixed column (80 characters of the editor font), not tracking the view.
+    let want = e.column_pts();
+    assert!((width - want).abs() <= 0.5, "container {width} != column {want}");
     let glyphs = lm.numberOfGlyphs();
     let (mut i, mut lines) = (0, 0);
     while i < glyphs {
@@ -1942,6 +2051,9 @@ fn main() {
     // Never the user's real defaults domain.
     settings::set_defaults(Some(test_defaults()));
     fresh_defaults();
+    // Window frame autosave writes to the standard domain; put the user's frame back at the end.
+    let std = NSUserDefaults::standardUserDefaults();
+    let saved_frame = std.stringForKey(&NSString::from_str(FRAME_KEY));
     let tests: &[(&str, fn())] = &[
         ("opens_utf8", opens_utf8),
         ("refuses_non_utf8", refuses_non_utf8),
@@ -2037,6 +2149,9 @@ fn main() {
         ("window_min_width_follows_column", window_min_width_follows_column),
         ("restored_narrow_window_grows", restored_narrow_window_grows),
         ("kitchen_sink_lines_fit_column", kitchen_sink_lines_fit_column),
+        ("frame_restored_exactly", frame_restored_exactly),
+        ("second_window_cascades", second_window_cascades),
+        ("no_window_tabbing", no_window_tabbing),
     ];
     let mut failed = 0;
     for (name, f) in tests {
@@ -2045,6 +2160,10 @@ fn main() {
         failed += usize::from(!ok);
     }
     println!("\n{} passed; {failed} failed", tests.len() - failed);
+    match saved_frame {
+        Some(v) => unsafe { std.setObject_forKey(Some(&v), &NSString::from_str(FRAME_KEY)) },
+        None => std.removeObjectForKey(&NSString::from_str(FRAME_KEY)),
+    }
     if failed > 0 {
         std::process::exit(1);
     }

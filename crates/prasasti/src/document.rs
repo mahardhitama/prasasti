@@ -11,7 +11,7 @@ use objc2::{DefinedClass, MainThreadOnly, Message, define_class, msg_send, sel};
 use objc2_app_kit::{
     NSAlert, NSAlertFirstButtonReturn, NSFont, NSFontAttributeName, NSFontManager, NSAttributedStringDocumentFormats, NSDocumentTypeDocumentOption, NSHTMLTextDocumentType, NSTimeoutDocumentOption, NSColor, NSForegroundColorAttributeName, NSLayoutManager, NSPrintInfo, NSPrintOperation, NSTextContainer, NSTextStorage, NSTextView, NSAlertSecondButtonReturn, NSBackingStoreType, NSDocument,
     NSDocumentChangeType, NSModalResponse, NSSaveOperationType,
-    NSWindow, NSWindowController, NSWindowStyleMask, NSWindowTitleVisibility,
+    NSApplication, NSWindow, NSWindowController, NSWindowStyleMask, NSWindowTabbingMode, NSWindowTitleVisibility,
 };
 use objc2_foundation::{
     MainThreadMarker, NSArray, NSAttributedString, NSCocoaErrorDomain, NSCopying, NSData, NSDate, NSDictionary, NSError,
@@ -150,6 +150,7 @@ define_class!(
             // Window menu, Mission Control and Accessibility.
             window.setTitlebarAppearsTransparent(true);
             window.setTitleVisibility(NSWindowTitleVisibility::Hidden);
+            window.setTabbingMode(NSWindowTabbingMode::Disallowed);
 
             let (content, editor) = window_content(frame);
             editor.setString(&self.ivars().text.borrow());
@@ -161,7 +162,19 @@ define_class!(
                 Some(&window),
             );
             window.center();
+            // The first window gets the saved frame exactly, so AppKit's
+            // cascade must not shift it. While another document window is
+            // open, the name is taken (no restore, no autosave): this one
+            // takes the saved size and cascades from that window.
+            controller.setShouldCascadeWindows(false);
+            let others = other_document_windows(mtm, &window);
             controller.setWindowFrameAutosaveName(ns_string!("PrasastiMain"));
+            if let Some(other) = others.last() {
+                window.setFrameUsingName(ns_string!("PrasastiMain"));
+                let f = other.frame();
+                let next = window.cascadeTopLeftFromPoint(NSPoint::new(f.origin.x, f.origin.y + f.size.height));
+                window.cascadeTopLeftFromPoint(next);
+            }
             // A restored frame may be narrower than the column.
             content.update_min_width();
             self.addWindowController(&controller);
@@ -731,6 +744,16 @@ impl PrasastiDocument {
     pub fn editor(&self) -> Option<Retained<EditorView>> {
         self.ivars().editor.borrow().clone()
     }
+}
+
+/// The other windows that show a document.
+fn other_document_windows(mtm: MainThreadMarker, window: &NSWindow) -> Vec<Retained<NSWindow>> {
+    NSApplication::sharedApplication(mtm)
+        .windows()
+        .iter()
+        // SAFETY: a plain getter; it is nil once the document has closed.
+        .filter(|w| &**w != window && w.windowController().is_some_and(|c| unsafe { c.document() }.is_some()))
+        .collect()
 }
 
 /// The window's content (find bar, editor, status pill) and its editor.

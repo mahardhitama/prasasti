@@ -1,7 +1,7 @@
 use objc2::rc::Retained;
 use objc2::runtime::Sel;
 use objc2::{MainThreadOnly, sel};
-use objc2_app_kit::{NSApplication, NSEventModifierFlags, NSFontManager, NSMenu, NSMenuItem};
+use objc2_app_kit::{NSApplication, NSEventModifierFlags, NSFontManager, NSMenu, NSMenuItem, NSWindow};
 use objc2_foundation::{MainThreadMarker, NSString};
 
 const CMD: NSEventModifierFlags = NSEventModifierFlags::Command;
@@ -46,6 +46,9 @@ fn add_submenu(mtm: MainThreadMarker, parent: &NSMenu, sub: &NSMenu) {
 
 /// Builds the main menu and installs it on `app`.
 pub fn install(app: &NSApplication, mtm: MainThreadMarker) {
+    // Every document gets its own window: no tabs, and no "Show Tab Bar" or
+    // "Merge All Windows" items. Must precede the first window.
+    NSWindow::setAllowsAutomaticWindowTabbing(false, mtm);
     let main = NSMenu::new(mtm);
     let s = |t, a, k, m| Some((t, a, k, m));
 

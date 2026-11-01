@@ -121,8 +121,10 @@ impl DocumentView {
         let iv = self.ivars();
         let shown = !iv.find_bar.isHidden();
         if let Some([full, bar]) = iv.tops.get() {
-            full.setActive(!shown);
-            bar.setActive(shown);
+            // Deactivate first: both active at once would conflict.
+            let (off, on) = if shown { (full, bar) } else { (bar, full) };
+            off.setActive(false);
+            on.setActive(true);
         }
         self.apply_insets();
     }
