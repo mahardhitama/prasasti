@@ -6,6 +6,7 @@ pub mod export;
 pub mod find_bar;
 pub mod glass;
 pub mod menu;
+pub mod paste_image;
 pub mod preview;
 pub mod settings;
 pub mod status;

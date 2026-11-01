@@ -2087,6 +2087,95 @@ fn kitchen_sink_lines_fit_column() {
     win.close();
 }
 
+// ---- Image paths on save ----
+
+/// `saveToURL:ofType:forSaveOperation:` to `path`; waits and asserts success.
+fn save_op(doc: &PrasastiDocument, path: &std::path::Path, op: objc2_app_kit::NSSaveOperationType) {
+    let url = NSURL::fileURLWithPath(&NSString::from_str(path.to_str().unwrap()));
+    let failed = std::rc::Rc::new(std::cell::Cell::new(None));
+    let f = failed.clone();
+    let done = block2::RcBlock::new(move |e: *mut NSError| f.set(Some(!e.is_null())));
+    doc.saveToURL_ofType_forSaveOperation_completionHandler(&url, ns_string!(MD), op, &done);
+    wait_until(|| failed.get().is_some());
+    assert_eq!(failed.get(), Some(false), "save succeeds");
+}
+
+fn first_save_rebases_images() {
+    let dir = std::env::temp_dir().join(format!("prasasti-rebase-first-{}-{}", std::process::id(), std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_nanos()));
+    std::fs::create_dir_all(&dir).unwrap();
+    std::fs::write(dir.join("img.png"), b"png").unwrap();
+    let doc = PrasastiDocument::new(mtm());
+    doc.makeWindowControllers();
+    let r = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        let e = doc.editor().unwrap();
+        let before = format!("hi\n![]({}/img.png)\n", dir.display());
+        e.setString(&NSString::from_str(&before));
+        e.setSelectedRange(NSRange::new(1, 0));
+        save_op(&doc, &dir.join("doc.md"), objc2_app_kit::NSSaveOperationType::SaveOperation);
+        assert_eq!(doc.text().to_string(), "hi\n![](img.png)\n");
+        assert_eq!(std::fs::read_to_string(dir.join("doc.md")).unwrap(), "hi\n![](img.png)\n");
+        assert_eq!(e.selectedRange(), NSRange::new(1, 0), "the caret before the image stays put");
+        assert_eq!(e.undoManager().unwrap().undoMenuItemTitle().to_string(), "Undo Update Image Paths");
+        ui::shortcut(&document_window(&doc), "z", CMD);
+        assert_eq!(doc.text().to_string(), before);
+    }));
+    doc.close();
+    let _ = std::fs::remove_dir_all(&dir);
+    r.unwrap_or_else(|e| std::panic::resume_unwind(e))
+}
+
+/// Save As into `<dir>/b/new.md` from `<dir>/doc.md` holding `![](doc.assets/p.png)`.
+fn save_as_with_asset(fx: &OnDisk) -> std::path::PathBuf {
+    let dir = fx.path.parent().unwrap();
+    std::fs::create_dir_all(dir.join("doc.assets")).unwrap();
+    std::fs::write(dir.join("doc.assets/p.png"), b"mine").unwrap();
+    fx.doc.editor().unwrap().setString(ns_string!("![](doc.assets/p.png)\n"));
+    let b = dir.join("b");
+    std::fs::create_dir_all(&b).unwrap();
+    save_op(&fx.doc, &b.join("new.md"), objc2_app_kit::NSSaveOperationType::SaveAsOperation);
+    b
+}
+
+fn save_as_moves_relative_and_carries_assets() {
+    on_disk("save-as-carry", "a\n", |fx| {
+        let b = save_as_with_asset(fx);
+        assert_eq!(std::fs::read(b.join("new.assets/p.png")).unwrap(), b"mine");
+        assert_eq!(fx.text(), "![](new.assets/p.png)\n");
+        assert_eq!(std::fs::read_to_string(b.join("new.md")).unwrap(), "![](new.assets/p.png)\n");
+        assert!(fx.path.parent().unwrap().join("doc.assets/p.png").exists(), "copied, not moved");
+    });
+}
+
+fn carry_never_overwrites() {
+    on_disk("carry-clash", "a\n", |fx| {
+        let b = fx.path.parent().unwrap().join("b");
+        std::fs::create_dir_all(b.join("new.assets")).unwrap();
+        std::fs::write(b.join("new.assets/p.png"), b"other").unwrap();
+        save_as_with_asset(fx);
+        assert_eq!(std::fs::read(b.join("new.assets/p.png")).unwrap(), b"other");
+        assert_eq!(std::fs::read(b.join("new.assets/p-2.png")).unwrap(), b"mine");
+        assert_eq!(fx.text(), "![](new.assets/p-2.png)\n");
+    });
+}
+
+fn autosave_never_rebases() {
+    on_disk("autosave-no-rebase", "a\n", |fx| {
+        fx.type_text("![](/abs/x.png)");
+        assert!(fx.autosave(true));
+        assert_eq!(fx.disk(), "![](/abs/x.png)a\n");
+    });
+}
+
+fn save_to_never_rebases() {
+    on_disk("save-to-no-rebase", "a\n", |fx| {
+        fx.doc.editor().unwrap().setString(ns_string!("![](/abs/x.png)\n"));
+        let copy = fx.path.parent().unwrap().join("copy.md");
+        save_op(&fx.doc, &copy, objc2_app_kit::NSSaveOperationType::SaveToOperation);
+        assert_eq!(std::fs::read_to_string(copy).unwrap(), "![](/abs/x.png)\n");
+        assert_eq!(fx.text(), "![](/abs/x.png)\n");
+    });
+}
+
 // ---- Modes ----
 
 fn content_of(win: &objc2_app_kit::NSWindow) -> Retained<DocumentView> {
@@ -2570,6 +2659,11 @@ fn main() {
         ("preview_rerenders_after_reload", preview_rerenders_after_reload),
         ("autosave_unaffected_by_mode", autosave_unaffected_by_mode),
         ("view_menu_checks_active_mode", view_menu_checks_active_mode),
+        ("first_save_rebases_images", first_save_rebases_images),
+        ("save_as_moves_relative_and_carries_assets", save_as_moves_relative_and_carries_assets),
+        ("carry_never_overwrites", carry_never_overwrites),
+        ("autosave_never_rebases", autosave_never_rebases),
+        ("save_to_never_rebases", save_to_never_rebases),
     ];
     let mut failed = 0;
     for (name, f) in tests {

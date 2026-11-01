@@ -1,4 +1,5 @@
 use std::cell::{Cell, RefCell};
+use std::path::{Path, PathBuf};
 use std::ptr;
 use std::sync::atomic::{AtomicBool, Ordering};
 
@@ -64,6 +65,8 @@ pub struct Ivars {
     titlebar: RefCell<Option<Retained<Titlebar>>>,
     /// Read from a file (or a recovery draft): the window opens in Preview.
     read_from_disk: Cell<bool>,
+    /// Where pasted images of this document go until it is saved.
+    paste_dir: RefCell<Option<PathBuf>>,
 }
 
 impl Ivars {
@@ -80,6 +83,7 @@ impl Ivars {
             frame_observers: RefCell::new(Vec::new()),
             titlebar: RefCell::new(None),
             read_from_disk: Cell::new(false),
+            paste_dir: RefCell::new(None),
         }
     }
 }
@@ -403,6 +407,10 @@ impl PrasastiDocument {
         if op == NSSaveOperationType::AutosaveElsewhereOperation && self.fileURL().is_some() {
             return self.write_draft(move |err| handler.call((err,)));
         }
+        if matches!(op, NSSaveOperationType::SaveOperation | NSSaveOperationType::SaveAsOperation) {
+            // A rebase failure never blocks the save; it then writes the text unchanged.
+            guarded(|| self.rebase_images(url));
+        }
         let this = self.retain();
         let done = RcBlock::new(move |err: *mut NSError| {
             if err.is_null() {
@@ -414,6 +422,49 @@ impl PrasastiDocument {
             handler.call((err,));
         });
         unsafe { msg_send![super(self), saveToURL: url, ofType: kind, forSaveOperation: op, completionHandler: &*done] }
+    }
+
+    /// Before a Save or Save As into another folder: copies this document's
+    /// images next to `url` and makes image paths relative to its folder, as
+    /// one undo step. The save that follows writes the editor text, so it
+    /// includes this edit.
+    fn rebase_images(&self, url: &NSURL) {
+        let Some(editor) = self.editor() else { return };
+        let Some(target) = url.path().map(|p| PathBuf::from(p.to_string())) else { return };
+        let Some(new_dir) = target.parent() else { return };
+        let old = self.path().map(PathBuf::from);
+        let old_dir = old.as_deref().and_then(Path::parent);
+        if old_dir == Some(new_dir) {
+            return;
+        }
+        let w = |p: &Path| p.to_string_lossy().encode_utf16().collect::<Vec<u16>>();
+        let (old_w, new_w) = (old_dir.map(w), w(new_dir));
+        let text = crate::util::to_u16(&editor.string());
+        // First pass only collects the paths `rebase` will remap, keyed exactly as it sees them.
+        let keys = RefCell::new(Vec::new());
+        prasasti_core::images::rebase(&text, old_w.as_deref(), &new_w, |p| {
+            keys.borrow_mut().push(p.to_vec());
+            None
+        });
+        let sources: Vec<PathBuf> = self.ivars().paste_dir.borrow().iter().cloned().chain(old.as_deref().map(crate::paste_image::assets_dir)).collect();
+        // A failed copy is not in the map: that link keeps pointing at the original.
+        let (map, errors) = crate::paste_image::carry(&keys.borrow(), &sources, &crate::paste_image::assets_dir(&target));
+        if !errors.is_empty()
+            && let Some(status) = editor.status()
+        {
+            status.flash(&errors.join("; "));
+        }
+        let Some(edit) = prasasti_core::images::rebase(&text, old_w.as_deref(), &new_w, |p| map.get(p).cloned()) else { return };
+        // The user's selection, not the edit's caret, shifted if it lay after the edit.
+        let sel = editor.selectedRange();
+        editor.apply_edit(&edit);
+        let delta = edit.replacement.encode_utf16().count() as isize - edit.range.len() as isize;
+        let len = editor.string().length();
+        let loc = if sel.location >= edit.range.end { sel.location.saturating_add_signed(delta) } else { sel.location }.min(len);
+        editor.setSelectedRange(NSRange::new(loc, sel.length.min(len - loc)));
+        if let Some(undo) = editor.undoManager() {
+            undo.setActionName(ns_string!("Update Image Paths"));
+        }
     }
 
     /// Reopened from a recovery draft: the draft was written because autosave
