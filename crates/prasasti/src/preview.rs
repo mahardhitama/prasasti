@@ -563,7 +563,19 @@ fn opens_directly(p: &Path) -> bool {
     let Ok(p) = std::fs::canonicalize(p) else { return false };
     let Ok(meta) = std::fs::metadata(&p) else { return false };
     let ext = p.extension().and_then(|e| e.to_str()).unwrap_or_default().to_ascii_lowercase();
-    meta.is_file() && meta.permissions().mode() & 0o111 == 0 && !LAUNCHERS.contains(&ext.as_str())
+    meta.is_file() && meta.permissions().mode() & 0o111 == 0 && !LAUNCHERS.contains(&ext.as_str()) && !is_alias(&p)
+}
+
+/// A Finder alias is a plain file that opens (or launches) its target.
+fn is_alias(p: &Path) -> bool {
+    let Some(s) = p.to_str() else { return true };
+    let url = NSURL::fileURLWithPath(&NSString::from_str(s));
+    let key = unsafe { objc2_foundation::NSURLIsAliasFileKey };
+    let mut value: Option<objc2::rc::Retained<objc2::runtime::AnyObject>> = None;
+    // SAFETY: `value` is a valid out-pointer for the resource value.
+    let ok = unsafe { url.getResourceValue_forKey_error(&mut value, key) }.is_ok();
+    // Unknown counts as an alias: reveal rather than open.
+    !ok || value.and_then(|v| v.downcast::<objc2_foundation::NSNumber>().ok()).is_none_or(|n| n.boolValue())
 }
 
 /// Opens a clicked link outside: web and mail links in their apps; a local
@@ -684,6 +696,17 @@ mod tests {
         let link = dir.join("a-link.png");
         std::os::unix::fs::symlink(dir.join("a.png"), &link).unwrap();
         assert!(opens_directly(&link), "symlink to a plain file");
+        // A Finder alias to an app is a plain, non-executable file.
+        let url = |p: &Path| NSURL::fileURLWithPath(&NSString::from_str(p.to_str().unwrap()));
+        let data = url(&dir.join("A.app"))
+            .bookmarkDataWithOptions_includingResourceValuesForKeys_relativeToURL_error(
+                objc2_foundation::NSURLBookmarkCreationOptions::SuitableForBookmarkFile,
+                None,
+                None,
+            )
+            .unwrap();
+        NSURL::writeBookmarkData_toURL_options_error(&data, &url(&dir.join("alias.md")), 0).unwrap();
+        assert!(!opens_directly(&dir.join("alias.md")), "Finder alias");
         let _ = std::fs::remove_dir_all(&dir);
     }
 
