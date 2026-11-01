@@ -1,0 +1,14 @@
+[package]
+name = "prasasti"
+version = "0.1.0"
+edition = "2024"
+
+[[test]]
+name = "app"
+harness = false
+
+[dependencies]
+objc2 = "0.6.5"
+objc2-app-kit = { version = "0.3.2", default-features = false, features = ["std", "NSDocument", "NSTextView", "NSWindowController", "NSMenu", "NSMenuItem", "NSApplication", "NSScrollView", "NSTextStorage", "NSLayoutManager", "NSTextContainer", "NSResponder", "NSView", "NSWindow", "NSText", "NSRunningApplication", "NSGraphics", "NSFontPanel", "NSUserInterfaceValidation", "NSPrintInfo", "NSFontManager", "NSTextCheckingClient", "NSTextInputClient", "NSDragging", "NSAttributedString", "NSDocumentController", "NSWindowRestoration", "NSColor", "objc2-core-foundation", "NSEvent"] }
+objc2-foundation = "0.3.2"
+prasasti-core = { version = "0.1.0", path = "../prasasti-core" }
