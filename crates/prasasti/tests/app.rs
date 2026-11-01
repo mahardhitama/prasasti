@@ -2552,13 +2552,41 @@ fn preview_code_blocks_highlighted_numbered_and_copy_clean() {
     wait_for_js(&web, "String(document.fonts.check('15px \"Prasasti JetBrains Mono\"'))", "true", 5.0);
     assert!(js("getComputedStyle(document.querySelector('pre code')).fontFamily").contains("JetBrains Mono"));
     assert_ne!(js("String(document.querySelectorAll('pre code .hljs-keyword').length)"), "0", "keyword token");
-    assert_eq!(js("String(document.querySelectorAll('pre:nth-of-type(1) code .line').length)"), "3");
-    assert_eq!(js("String(document.querySelectorAll('pre:nth-of-type(2) code [class^=hljs]').length)"), "0", "untagged block is not highlighted");
-    assert_eq!(js("String(document.querySelectorAll('pre:nth-of-type(2) code .line').length)"), "2", "but still numbered");
-    assert_eq!(js("String(document.querySelectorAll('.ind').length)"), "2", "one guide per indented line");
+    assert_eq!(js("String(document.querySelectorAll('.code-block:nth-of-type(1) code .line').length)"), "3");
+    assert_eq!(js("String(document.querySelectorAll('.code-block:nth-of-type(2) code [class^=hljs]').length)"), "0", "untagged block is not highlighted");
+    assert_eq!(js("String(document.querySelectorAll('.code-block:nth-of-type(2) code .line').length)"), "2", "but still numbered");
+    assert_eq!(js("String(document.querySelectorAll('.ind').length)"), "0", "no indent guides");
     assert_eq!(js("getComputedStyle(document.querySelector('.line'), '::before').content"), "counter(ln)", "numbers are generated content");
     js("(() => { const r = document.createRange(); r.selectNodeContents(document.querySelector('pre code')); const s = getSelection(); s.removeAllRanges(); s.addRange(r); return 1; })()");
     assert_eq!(js("getSelection().toString()"), "fn main() {\n    let x = 1;\n}");
+    win.close();
+}
+
+fn preview_copy_button_copies_code() {
+    let (win, _e) = ui::window_with("```rust\nfn main() {\n    let x = 1;\n}\n```\n\n```mermaid\ngraph TD; A-->B\n```\n");
+    let v = content_of(&win);
+    v.set_mode(Mode::Preview);
+    let web = v.preview().expect("preview");
+    wait_for_js(&web, "String(document.body && document.body.dataset.rendered)", "1", 10.0);
+    let js = |s: &str| web.eval(s, 5.0).unwrap_or_default();
+    assert_eq!(js("String(document.querySelectorAll('pre').length)"), "1", "mermaid block is a diagram");
+    assert_eq!(js("String(document.querySelectorAll('button.copy-code').length)"), "1", "one button, none on the diagram");
+    assert_eq!(js("document.querySelector('button.copy-code').getAttribute('aria-label')"), "Copy code");
+    with_clipboard("before", || {
+        js("document.querySelector('button.copy-code').click(); 'ok'");
+        let start = Instant::now();
+        let pb = NSPasteboard::generalPasteboard();
+        let got = || pb.stringForType(unsafe { NSPasteboardTypeString }).map(|s| s.to_string());
+        while got().as_deref() == Some("before") && start.elapsed().as_secs_f64() < 5.0 {
+            ui::pump(0.05);
+        }
+        assert_eq!(got().as_deref(), Some("fn main() {\n    let x = 1;\n}"));
+    });
+    let pill = v.status();
+    assert_eq!(pill.text(), "Copied to clipboard");
+    js("(() => { const r = document.createRange(); r.selectNodeContents(document.querySelector('.code-block')); const s = getSelection(); s.removeAllRanges(); s.addRange(r); return 1; })()");
+    assert_eq!(js("getComputedStyle(document.querySelector('button.copy-code')).webkitUserSelect"), "none");
+    assert_eq!(js("getSelection().toString().trim()"), "fn main() {\n    let x = 1;\n}", "selection is the code alone");
     win.close();
 }
 
@@ -2721,6 +2749,7 @@ fn main() {
         ("kitchen_sink_lines_fit_column", kitchen_sink_lines_fit_column),
         ("kitchen_sink_renders", kitchen_sink_renders),
         ("preview_code_blocks_highlighted_numbered_and_copy_clean", preview_code_blocks_highlighted_numbered_and_copy_clean),
+        ("preview_copy_button_copies_code", preview_copy_button_copies_code),
         ("preview_never_navigates_away", preview_never_navigates_away),
         ("kitchen_sink_unchanged_after_open_close", kitchen_sink_unchanged_after_open_close),
         ("image_beside_doc_in_odd_folder_loads", image_beside_doc_in_odd_folder_loads),

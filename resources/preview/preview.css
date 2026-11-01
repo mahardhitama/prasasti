@@ -21,7 +21,7 @@ code, pre { font-family: 'Prasasti JetBrains Mono', 'JetBrains Mono', ui-monospa
 code { background: var(--code-bg); border-radius: 3px; padding: 0 0.2em; }
 pre { background: var(--code-bg); border-radius: 6px; padding: 0.8em 1em; overflow-x: auto; }
 pre code { background: none; padding: 0; counter-reset: ln; }
-/* Line numbers and indent guides are generated content / backgrounds, so they
+/* Line numbers are generated content, so they
    never reach the selection or the clipboard. preview.js adds the spans. */
 .line::before {
   counter-increment: ln;
@@ -38,19 +38,24 @@ pre code { background: none; padding: 0; counter-reset: ln; }
   user-select: none;
   -webkit-user-select: none;
 }
-.ind {
-  display: inline-block;
-  background: repeating-linear-gradient(to right, var(--tok-guide) 0 1px, transparent 1px calc(var(--u, 4) * 1ch));
+.code-block { position: relative; }
+.copy-code {
+  position: absolute; top: 0.4em; right: 0.4em;
+  display: flex; padding: 4px; border: 0; border-radius: 5px;
+  background: var(--code-bg); color: var(--marker); opacity: 0.6; cursor: pointer;
+  user-select: none; -webkit-user-select: none;
 }
+.copy-code:hover, .copy-code:focus-visible { opacity: 1; color: var(--text); }
+.copy-code:focus-visible { outline: 2px solid var(--accent); }
 :root {
-  --tok-gutter: #9ca0b0; --tok-guide: #bcc0cc; /* Latte overlay0, surface1 */
+  --tok-gutter: #9ca0b0; /* Latte overlay0 */
   --tok-keyword: #8839ef; --tok-string: #40a02b; --tok-number: #fe640b; --tok-func: #1e66f5;
   --tok-type: #df8e1d; --tok-comment: #7c7f93; --tok-op: #04a5e5; --tok-var: #e64553;
   --tok-builtin: #d20f39; --tok-meta: #ea76cb;
 }
 @media (prefers-color-scheme: dark) {
   :root {
-    --tok-gutter: #6c7086; --tok-guide: #45475a; /* Mocha overlay0, surface1 */
+    --tok-gutter: #6c7086; /* Mocha overlay0 */
     --tok-keyword: #cba6f7; --tok-string: #a6e3a1; --tok-number: #fab387; --tok-func: #89b4fa;
     --tok-type: #f9e2af; --tok-comment: #9399b2; --tok-op: #89dceb; --tok-var: #eba0ac;
     --tok-builtin: #f38ba8; --tok-meta: #f5c2e7;

@@ -11,14 +11,17 @@ use block2::RcBlock;
 use objc2::rc::{Retained, Weak};
 use objc2::runtime::{AnyObject, ProtocolObject};
 use objc2::{AnyThread, DefinedClass, MainThreadOnly, define_class, msg_send, sel};
-use objc2_app_kit::{NSEvent, NSEventModifierFlags, NSMenuItem, NSResponder, NSView, NSWorkspace};
+use objc2_app_kit::{
+    NSEvent, NSEventModifierFlags, NSMenuItem, NSPasteboard, NSPasteboardTypeString, NSResponder, NSView, NSWorkspace,
+};
 use objc2_foundation::{
     MainThreadMarker, NSArray, NSBundle, NSData, NSDate, NSDictionary, NSError, NSHTTPURLResponse, NSObject,
     NSObjectProtocol, NSRect, NSRunLoop, NSString, NSURL, NSURLErrorBadURL, NSURLErrorDomain, ns_string,
 };
 use objc2_web_kit::{
     WKNavigation, WKNavigationAction, WKNavigationActionPolicy, WKNavigationDelegate, WKNavigationType,
-    WKURLSchemeHandler, WKURLSchemeTask, WKWebView, WKWebViewConfiguration,
+    WKScriptMessage, WKScriptMessageHandler, WKURLSchemeHandler, WKURLSchemeTask, WKUserContentController, WKWebView,
+    WKWebViewConfiguration,
 };
 use pulldown_cmark::{Event, Options, Parser, Tag, TagEnd, html};
 
@@ -302,6 +305,53 @@ fn fail(task: &ProtocolObject<dyn WKURLSchemeTask>) {
     }
 }
 
+define_class!(
+    // SAFETY: NSObject has no subclassing requirements; no Drop. Holds the
+    // editor weakly: the content controller retains this handler, never the view.
+    #[unsafe(super(NSObject))]
+    #[thread_kind = MainThreadOnly]
+    #[ivars = Weak<EditorView>]
+    struct CopyHandler;
+
+    unsafe impl NSObjectProtocol for CopyHandler {}
+
+    unsafe impl WKScriptMessageHandler for CopyHandler {
+        #[unsafe(method(userContentController:didReceiveScriptMessage:))]
+        fn did_receive(&self, _ucc: &WKUserContentController, message: &WKScriptMessage) {
+            guarded(|| {
+                // SAFETY: a plain getter; the body is page input, so it is checked below.
+                let body = unsafe { message.body() };
+                if let Some(text) = copy_text(&body) {
+                    let pb = NSPasteboard::generalPasteboard();
+                    pb.clearContents();
+                    // SAFETY: a constant type name.
+                    pb.setString_forType(&NSString::from_str(&text), unsafe { NSPasteboardTypeString });
+                    if let Some(pill) = self.ivars().load().and_then(|e| e.status()) {
+                        pill.flash("Copied to clipboard");
+                    }
+                }
+            });
+        }
+    }
+);
+
+impl CopyHandler {
+    fn new(mtm: MainThreadMarker, editor: &EditorView) -> Retained<Self> {
+        let this = Self::alloc(mtm).set_ivars(Weak::new(editor));
+        // SAFETY: NSObject's designated initializer.
+        unsafe { msg_send![super(this), init] }
+    }
+}
+
+/// The text of a `{type: "copy", text: String}` page message; anything else is ignored.
+fn copy_text(body: &AnyObject) -> Option<String> {
+    let dict = body.downcast_ref::<NSDictionary>()?;
+    let get = |k: &NSString| dict.objectForKey(k);
+    let kind = get(ns_string!("type"))?;
+    let text = get(ns_string!("text"))?;
+    (kind.downcast_ref::<NSString>()?.to_string() == "copy").then(|| text.downcast_ref::<NSString>().map(|t| t.to_string()))?
+}
+
 pub struct Ivars {
     editor: Weak<EditorView>,
     _handler: Retained<SchemeHandler>,
@@ -385,6 +435,14 @@ impl PreviewView {
         let handler = SchemeHandler::new(mtm, asset_root());
         // SAFETY: "prasasti" is not a scheme WebKit handles itself.
         unsafe { config.setURLSchemeHandler_forURLScheme(Some(ProtocolObject::from_ref(&*handler)), ns_string!("prasasti")) };
+        // The configuration's controller retains the handler for the web view's life.
+        // SAFETY: a fresh controller; the page posts to `webkit.messageHandlers.prasasti`.
+        unsafe {
+            config.userContentController().addScriptMessageHandler_name(
+                ProtocolObject::from_ref(&*CopyHandler::new(mtm, editor)),
+                ns_string!("prasasti"),
+            )
+        };
         let this = Self::alloc(mtm).set_ivars(Ivars {
             editor: Weak::new(editor),
             _handler: handler,
