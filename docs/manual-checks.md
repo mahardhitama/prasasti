@@ -91,7 +91,7 @@ locked). `cargo clippy --workspace --all-targets` has no errors.
   `#eff1f5`, text `#4c4f69`, accent `#1e66f5`); Dark is Mocha (`#1e1e2e`,
   `#cdd6f4`, `#89b4fa`). Editor and Preview match in each, and the editor's
   code panel, selection, find highlights and the pill follow.
-- **needs user**: **live switch.** With a document open in each mode, flip System
+- **needs user**: **live switch (incl. Preview in Dark).** With a document open in each mode, flip System
   Settings > Appearance, then use the toolbar button for Light and Dark. Both
   the editor and Preview restyle at once, with no relaunch.
 
