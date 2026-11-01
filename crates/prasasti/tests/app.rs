@@ -2007,6 +2007,24 @@ fn last_closed_window_frame_is_stored() {
     assert_frames_equal(open_resize_close(doc_from(b"c"), want), want);
 }
 
+fn resize_in_place_is_stored_without_closing() {
+    fresh_defaults();
+    close_all_documents();
+    autoreleasepool(|_| {
+        let d = doc_from(b"x");
+        d.makeWindowControllers();
+        let win = document_window(&d);
+        let mut f = win.frame();
+        f.size.width += 37.0;
+        f.size.height += 23.0;
+        win.setFrame_display(f, false); // same origin, new size, no live resize
+        let saved = NSUserDefaults::standardUserDefaults().stringForKey(&NSString::from_str(FRAME_KEY)).expect("saved").to_string();
+        let n: Vec<f64> = saved.split_whitespace().take(4).map(|v| v.parse().unwrap()).collect();
+        assert_eq!((n[2], n[3]), (win.frame().size.width, win.frame().size.height), "{saved}");
+        d.close();
+    });
+}
+
 fn no_window_tabbing() {
     let d = doc_from(b"x");
     d.makeWindowControllers();
@@ -2171,6 +2189,7 @@ fn main() {
         ("frame_restored_exactly", frame_restored_exactly),
         ("second_window_cascades", second_window_cascades),
         ("last_closed_window_frame_is_stored", last_closed_window_frame_is_stored),
+        ("resize_in_place_is_stored_without_closing", resize_in_place_is_stored_without_closing),
         ("no_window_tabbing", no_window_tabbing),
     ];
     let mut failed = 0;

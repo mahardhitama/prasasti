@@ -181,7 +181,7 @@ define_class!(
             let sender: &AnyObject = &window;
             *self.ivars().frame_observers.borrow_mut() = [
                 "NSWindowDidMoveNotification",
-                "NSWindowDidEndLiveResizeNotification",
+                "NSWindowDidResizeNotification",
                 "NSWindowWillCloseNotification",
             ]
             .map(|name| {
