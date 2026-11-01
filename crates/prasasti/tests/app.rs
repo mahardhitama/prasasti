@@ -1333,6 +1333,61 @@ fn buttons_in(v: &objc2_app_kit::NSView) -> Vec<Retained<NSButton>> {
 
 /// Through the real presenter path: a coordinated write from another thread
 /// reaches `presentedItemDidChange` on the presenter queue, then main.
+// ---- Runtime class names and typing around autosave ----
+
+/// The class the Objective-C runtime knows by `name`, if any.
+fn class_named(name: &str) -> Option<&'static objc2::runtime::AnyClass> {
+    objc2::runtime::AnyClass::get(&std::ffi::CString::new(name).unwrap())
+}
+
+fn document_class_registered_by_name() {
+    use objc2::ClassType;
+    let ours = PrasastiDocument::class();
+    assert_eq!(class_named("PrasastiDocument"), Some(ours));
+}
+
+/// NSDocumentController finds the document class by the name in Info.plist.
+fn info_plist_classes_resolve() {
+    use objc2::ClassType;
+    let _ = PrasastiDocument::class();
+    let plist = concat!(env!("CARGO_MANIFEST_DIR"), "/../../packaging/Info.plist");
+    for key in ["NSPrincipalClass", "CFBundleDocumentTypes.0.NSDocumentClass"] {
+        let out = std::process::Command::new("plutil").args(["-extract", key, "raw", plist]).output().unwrap();
+        assert!(out.status.success(), "{key} missing from Info.plist");
+        let name = String::from_utf8(out.stdout).unwrap();
+        assert!(class_named(name.trim()).is_some(), "{key} = {name:?} is not a registered class");
+    }
+}
+
+/// Typing after an in-place autosave is a new change: edited, and autosaved next time.
+fn typing_after_autosave_counts() {
+    on_disk("after-autosave", "a\n", |fx| {
+        fx.type_text("b");
+        assert!(fx.autosave(true));
+        assert_eq!(fx.disk(), "ba\n");
+        fx.type_text("c");
+        assert!(fx.autosave(true));
+        assert_eq!(fx.disk(), "bca\n");
+    });
+}
+
+/// Typing after the autosave took its snapshot, before it finished, still
+/// counts as a change (the smoke run lost such an edit).
+fn typing_during_autosave_counts() {
+    on_disk("during-autosave", "a\n", |fx| {
+        fx.type_text("b");
+        let win = fx.win.clone();
+        document::AFTER_SNAPSHOT.with(|h| *h.borrow_mut() = Some(Box::new(move || ui::type_text(&win, "c"))));
+        assert!(fx.autosave(true));
+        assert!(document::AFTER_SNAPSHOT.with(|h| h.borrow().is_none()), "the hook ran");
+        assert_eq!(fx.disk(), "ba\n", "c came after the snapshot");
+        ui::pump(0.05);
+        assert!(fx.doc.isDocumentEdited(), "typing during the autosave marks the document edited");
+        assert!(fx.autosave(true));
+        assert_eq!(fx.disk(), "bca\n");
+    });
+}
+
 fn presenter_reloads_clean_doc() {
     on_disk("presenter", "a\n", |fx| {
         // The document controller registers it as a file presenter, as in the app.
@@ -1438,6 +1493,10 @@ fn main() {
         ("drafts_rotate_keeping_two", drafts_rotate_keeping_two),
         ("hold_change_replaces_sheet", hold_change_replaces_sheet),
         ("presenter_reloads_clean_doc", presenter_reloads_clean_doc),
+        ("document_class_registered_by_name", document_class_registered_by_name),
+        ("info_plist_classes_resolve", info_plist_classes_resolve),
+        ("typing_after_autosave_counts", typing_after_autosave_counts),
+        ("typing_during_autosave_counts", typing_during_autosave_counts),
     ];
     let mut failed = 0;
     for (name, f) in tests {

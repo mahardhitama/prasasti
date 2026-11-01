@@ -29,6 +29,11 @@ use crate::util::guarded;
 /// Whether external-change and deletion sheets are shown (off in tests).
 pub static SHEETS_ENABLED: AtomicBool = AtomicBool::new(true);
 
+thread_local! {
+    /// Tests only: runs once right after the next save snapshot is taken.
+    pub static AFTER_SNAPSHOT: std::cell::RefCell<Option<Box<dyn FnOnce()>>> = const { std::cell::RefCell::new(None) };
+}
+
 /// Why autosave must not write the file right now.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum HoldReason {
@@ -73,6 +78,9 @@ impl Ivars {
 define_class!(
     // SAFETY: NSDocument is designed for subclassing; no Drop.
     #[unsafe(super(NSDocument))]
+    // Info.plist names this class (NSDocumentClass); objc2 would otherwise
+    // register a generated, version-suffixed name.
+    #[name = "PrasastiDocument"]
     #[thread_kind = MainThreadOnly]
     #[ivars = Ivars]
     pub struct PrasastiDocument;
@@ -183,6 +191,9 @@ define_class!(
             let bytes = guarded(|| normalize_newlines(&text).into_bytes()).unwrap_or(text.into_bytes());
             let data = NSData::with_bytes(&bytes);
             *self.ivars().pending.borrow_mut() = Some(bytes);
+            if let Some(f) = AFTER_SNAPSHOT.with(|h| h.borrow_mut().take()) {
+                f();
+            }
             data
         }
 
@@ -295,6 +306,11 @@ impl PrasastiDocument {
     }
 
     fn save_held_aware(&self, url: &NSURL, kind: &NSString, op: NSSaveOperationType, handler: RcBlock<dyn Fn(*mut NSError)>) {
+        // NSDocument takes its change-count token now; typing that coalesced
+        // into the open undo group would never count as a change (as TextEdit does).
+        if let Some(editor) = self.editor() {
+            editor.breakUndoCoalescing();
+        }
         // Backstop for any in-place autosave that does not go through `autosave`.
         if op == NSSaveOperationType::AutosaveInPlaceOperation {
             if let Some(reason) = self.hold() {

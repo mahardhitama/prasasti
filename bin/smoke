@@ -85,8 +85,8 @@ function run(argv) {
     // write lands ~15 s after the edit (measured), not within 10 s.
     check('autosave', wait(30, () => disk().includes('hello')))
 
-    // shortcut: typing within ~0.1 s of the autosave write loses track of the
-    // edit (see task-15 report); settle until the app fixes that race.
+    // shortcut: an external write within ~1-2 s of our own autosave never
+    // reaches the file presenter (see task-15 report, bug 4); settle until fixed.
     delay(2)
     keys('external-change', () => se.keystroke('x'))
     wait(2, () => ta().value().endsWith('x'))
