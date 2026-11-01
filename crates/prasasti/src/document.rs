@@ -15,7 +15,7 @@ use objc2_app_kit::{
 };
 use objc2_foundation::{
     MainThreadMarker, NSArray, NSAttributedString, NSCocoaErrorDomain, NSCopying, NSData, NSDate, NSDictionary, NSError,
-    NSFeatureUnsupportedError, NSFileReadInapplicableStringEncodingError, NSFileWriteUnknownError, NSLocalizedDescriptionKey,
+    NSFeatureUnsupportedError, NSFileReadInapplicableStringEncodingError, NSFileWriteUnknownError, NSLocalizedDescriptionKey, NSUserCancelledError,
     NSFileManager, NSObjectProtocol, NSPoint, NSProcessInfo, NSRange, NSRect, NSSearchPathDirectory,
     NSSearchPathDomainMask, NSSize, NSString, NSURL, NSURLContentModificationDateKey, ns_string,
 };
@@ -110,7 +110,9 @@ define_class!(
         fn save_document(&self, sender: Option<&AnyObject>) {
             // A change the presenter missed gets our sheet, not AppKit's
             // "changed by another application" alert; nothing is written.
-            if guarded(|| self.check_disk()).unwrap_or(false) {
+            // While a write is in flight the disk is mid-change; the post-save re-check covers it.
+            let writing = self.ivars().pending.borrow().is_some();
+            if !writing && guarded(|| self.check_disk()).unwrap_or(false) {
                 return;
             }
             if self.hold() == Some(HoldReason::Deleted) {
@@ -278,6 +280,12 @@ define_class!(
             guarded(|| self.disk_changed());
         }
 
+        // The post-save re-check: quiet while held (Keep Mine already answered).
+        #[unsafe(method(prasastiRecheckDisk))]
+        fn recheck_disk_on_main(&self) {
+            guarded(|| self.check_disk());
+        }
+
         #[unsafe(method(prasastiDeleted))]
         fn deleted_on_main(&self) {
             guarded(|| self.deleted());
@@ -316,6 +324,11 @@ impl PrasastiDocument {
         // into the open undo group would never count as a change (as TextEdit does).
         if let Some(editor) = self.editor() {
             editor.breakUndoCoalescing();
+        }
+        // Any other Save (the close/quit dialog's goes through
+        // saveDocumentWithDelegate:): our sheet instead of AppKit's alert.
+        if op == NSSaveOperationType::SaveOperation && self.check_disk() {
+            return call_with_error(&handler, &cancelled_error());
         }
         // Backstop for any in-place autosave that does not go through `autosave`.
         if op == NSSaveOperationType::AutosaveInPlaceOperation {
@@ -566,9 +579,9 @@ impl PrasastiDocument {
         if writes_file && pending.is_some() {
             *self.ivars().last_known.borrow_mut() = pending;
             // A write landing just after ours may never reach the presenter.
-            // SAFETY: `prasastiDiskChanged` is a no-argument void method of ours.
+            // SAFETY: `prasastiRecheckDisk` is a no-argument void method of ours.
             unsafe {
-                let _: () = msg_send![self, performSelector: sel!(prasastiDiskChanged), withObject: None::<&AnyObject>, afterDelay: 1.0f64];
+                let _: () = msg_send![self, performSelector: sel!(prasastiRecheckDisk), withObject: None::<&AnyObject>, afterDelay: 1.0f64];
             }
         }
     }
@@ -732,6 +745,11 @@ fn held_error(reason: HoldReason) -> Retained<NSError> {
         HoldReason::Deleted => "the file was deleted",
     };
     error_with(&format!("Auto-save is paused because {why}. Choose File > Save to keep your changes."))
+}
+
+/// User-cancelled: AppKit shows no alert for it.
+fn cancelled_error() -> Retained<NSError> {
+    unsafe { NSError::errorWithDomain_code_userInfo(NSCocoaErrorDomain, NSUserCancelledError, None) }
 }
 
 fn error_with(msg: &str) -> Retained<NSError> {

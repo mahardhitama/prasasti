@@ -14,29 +14,43 @@ fi
 bin/bundle >/dev/null
 
 drafts="$HOME/Library/Autosave Information"
+state="$(getconf DARWIN_USER_TEMP_DIR)com.mahardhitama.prasasti.savedState"
+[ -e "$state" ] && state_existed=1 || state_existed=
 tmp=$(mktemp -d)
 before="$tmp/drafts-before"
-ls "$drafts" 2>/dev/null >"$before" || true
+pidfile="$tmp/pid"
+ls -A "$drafts" >"$before" 2>/dev/null || [ ! -e "$drafts" ] || rm -f "$before"
 cleanup() {
-    # Only ever our own instance: nothing else was running when we started.
-    pid=$(pgrep -x prasasti || true)
-    [ -n "$pid" ] && kill $pid 2>/dev/null
-    # Recovery drafts this run created for note.md, nothing else.
-    ls "$drafts" 2>/dev/null | grep '^note' | while IFS= read -r f; do
-        grep -qxF "$f" "$before" || rm -f "$drafts/$f"
-    done
+    trap - EXIT INT TERM # exactly once, even when a signal is followed by EXIT
+    # Only the instance this run launched (the JXA records its pid).
+    pid=$(cat "$pidfile" 2>/dev/null || true)
+    if [ -n "$pid" ] && [ "$(ps -p "$pid" -o comm= 2>/dev/null | sed 's|.*/||')" = prasasti ]; then
+        kill "$pid" 2>/dev/null || true
+    fi
+    # Our own drafts for note.md (named "<displayName> (Autosaved <id>).md"), and
+    # only those absent from the snapshot. No readable snapshot: delete nothing.
+    if [ -r "$before" ]; then
+        ls -A "$drafts" 2>/dev/null | while IFS= read -r f; do
+            case "$f" in 'note.md (Autosaved '*').md') ;; *) continue ;; esac
+            rc=0; grep -qxF -- "$f" "$before" || rc=$?
+            [ "$rc" -eq 1 ] && rm -f "$drafts/$f" # 1 = not in the snapshot; 2 = error: keep
+        done || true
+    fi
+    # The state -ApplePersistenceIgnoreState writes, unless it predates us.
+    [ -n "$state_existed" ] || rm -rf "$state"
     rm -rf "$tmp"
 }
-trap cleanup EXIT INT TERM
+trap cleanup EXIT
+trap 'exit 130' INT TERM
 
 mkdir "$tmp/notes"
 note="$tmp/notes/note.md"
 printf '# Smoke\n' >"$note"
 
-osascript -l JavaScript - "$PWD/target/Prasasti.app" "$note" <<'JXA'
+osascript -l JavaScript - "$PWD/target/Prasasti.app" "$note" "$pidfile" <<'JXA'
 ObjC.import('Foundation'); ObjC.import('stdlib')
 function run(argv) {
-    const [appPath, note] = argv
+    const [appPath, note, pidfile] = argv
     const se = Application('System Events')
     const sh = Application.currentApplication()
     sh.includeStandardAdditions = true
@@ -66,6 +80,9 @@ function run(argv) {
 
     // Ignore saved windows from earlier runs; an argument, not a defaults write.
     sh.doShellScript('open -a ' + q(appPath) + ' ' + q(note) + ' --args -ApplePersistenceIgnoreState YES')
+    // Recorded at once, so cleanup kills only this instance, even if interrupted.
+    const pid = wait(5, () => proc().unixId())
+    if (pid) $(String(pid)).writeToFileAtomicallyEncodingError(pidfile, true, $.NSUTF8StringEncoding, null)
     if (!wait(5, () => win().exists())) {
         // Usually an alert window ("could not be opened"): show its text.
         try { console.log(proc().windows.staticTexts.value().flat().join(' ')) } catch (e) {}

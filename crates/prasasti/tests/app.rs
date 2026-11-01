@@ -1443,6 +1443,59 @@ fn rechecks_disk_after_save() {
     });
 }
 
+/// The close/quit dialog's Save (saveDocumentWithDelegate:) checks the disk
+/// too: our hold, no write, no AppKit alert.
+fn close_dialog_save_checks_disk() {
+    on_disk("close-save-check", "a\n", |fx| {
+        fx.type_text("mine ");
+        later();
+        fx.write("theirs\n");
+        let doc: &NSDocument = &fx.doc;
+        unsafe { doc.saveDocumentWithDelegate_didSaveSelector_contextInfo(None, None, std::ptr::null_mut()) };
+        ui::pump(0.3);
+        assert_eq!(fx.doc.hold(), Some(HoldReason::ExternalChange));
+        assert_eq!(fx.disk(), "theirs\n");
+        assert!(fx.win.attachedSheet().is_none(), "no AppKit alert");
+        assert!(fx.doc.isDocumentEdited());
+    });
+}
+
+/// A plain Save that finds the disk changed reports user-cancelled, once.
+fn save_op_cancels_when_disk_changed() {
+    on_disk("save-op-check", "a\n", |fx| {
+        fx.type_text("mine ");
+        later();
+        fx.write("theirs\n");
+        let codes = std::rc::Rc::new(std::cell::RefCell::new(Vec::new()));
+        let c = codes.clone();
+        let done = block2::RcBlock::new(move |e: *mut NSError| c.borrow_mut().push(unsafe { e.as_ref() }.map(|e| e.code())));
+        let url = fx.doc.fileURL().unwrap();
+        fx.doc.saveToURL_ofType_forSaveOperation_completionHandler(&url, ns_string!(MD), objc2_app_kit::NSSaveOperationType::SaveOperation, &done);
+        ui::pump(0.3);
+        assert_eq!(*codes.borrow(), vec![Some(3072)], "NSUserCancelledError, exactly once");
+        assert_eq!(fx.disk(), "theirs\n");
+        assert_eq!(fx.doc.hold(), Some(HoldReason::ExternalChange));
+    });
+}
+
+/// After Keep Mine, the post-save re-check does not ask again.
+fn recheck_after_keep_mine_stays_quiet() {
+    on_disk("recheck-keep", "a\n", |fx| {
+        document::SHEETS_ENABLED.store(true, std::sync::atomic::Ordering::SeqCst);
+        fx.type_text("b");
+        assert!(fx.autosave(true)); // schedules the re-check
+        fx.type_text("c");
+        later();
+        fx.write("theirs\n");
+        fx.doc.disk_changed();
+        click(&sheet_button(&fx.win, "Keep Mine"));
+        wait_until(|| fx.win.attachedSheet().is_none());
+        ui::pump(1.3);
+        assert!(fx.win.attachedSheet().is_none(), "no second sheet");
+        assert_eq!(fx.doc.hold(), Some(HoldReason::ExternalChange));
+    });
+}
+
 fn presenter_reloads_clean_doc() {
     on_disk("presenter", "a\n", |fx| {
         // The document controller registers it as a file presenter, as in the app.
@@ -1556,6 +1609,9 @@ fn main() {
         ("autosave_checks_missing_file", autosave_checks_missing_file),
         ("save_checks_disk_first", save_checks_disk_first),
         ("rechecks_disk_after_save", rechecks_disk_after_save),
+        ("close_dialog_save_checks_disk", close_dialog_save_checks_disk),
+        ("save_op_cancels_when_disk_changed", save_op_cancels_when_disk_changed),
+        ("recheck_after_keep_mine_stays_quiet", recheck_after_keep_mine_stays_quiet),
     ];
     let mut failed = 0;
     for (name, f) in tests {
