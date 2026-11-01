@@ -776,6 +776,23 @@ fn disk_date(path: &std::path::Path) -> Retained<objc2_foundation::NSDate> {
     vals.objectForKey(key).expect("date").downcast().expect("NSDate")
 }
 
+fn drafts_dir() -> std::path::PathBuf {
+    std::env::home_dir().unwrap().join("Library/Autosave Information")
+}
+
+fn draft_names() -> std::collections::HashSet<std::ffi::OsString> {
+    std::fs::read_dir(drafts_dir()).map(|d| d.flatten().map(|e| e.file_name()).collect()).unwrap_or_default()
+}
+
+/// Removes the test documents' drafts created since `before` (never anyone else's).
+fn remove_new_drafts(before: &std::collections::HashSet<std::ffi::OsString>) {
+    for name in draft_names().difference(before) {
+        if name.to_string_lossy().starts_with("doc.md (Autosaved ") {
+            let _ = std::fs::remove_file(drafts_dir().join(name));
+        }
+    }
+}
+
 /// Runs `f` on a document opened from `initial`, sheets off; cleans up after.
 fn on_disk(name: &str, initial: &str, f: impl FnOnce(&OnDisk)) {
     let dir = std::env::temp_dir().join(format!(
@@ -787,6 +804,7 @@ fn on_disk(name: &str, initial: &str, f: impl FnOnce(&OnDisk)) {
     let path = dir.join("doc.md");
     std::fs::write(&path, initial).unwrap();
     let sheets = document::SHEETS_ENABLED.swap(false, std::sync::atomic::Ordering::SeqCst);
+    let drafts_before = draft_names();
     let url = NSURL::fileURLWithPath(&NSString::from_str(path.to_str().unwrap()));
     let doc = PrasastiDocument::new(mtm());
     doc.readFromURL_ofType_error(&url, ns_string!(MD)).expect("read");
@@ -798,10 +816,8 @@ fn on_disk(name: &str, initial: &str, f: impl FnOnce(&OnDisk)) {
     doc.editor().unwrap().setSelectedRange(NSRange::new(0, 0));
     let fx = OnDisk { doc, win, path };
     let r = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| f(&fx)));
-    if let Some(draft) = fx.draft() {
-        let _ = std::fs::remove_file(draft);
-    }
     fx.doc.close();
+    remove_new_drafts(&drafts_before);
     document::SHEETS_ENABLED.store(sheets, std::sync::atomic::Ordering::SeqCst);
     let _ = std::fs::remove_dir_all(&dir);
     r.unwrap_or_else(|e| std::panic::resume_unwind(e))
@@ -868,9 +884,7 @@ fn autosave_skipped_while_held() {
         assert_eq!(fx.disk(), "theirs\n");
         let newer = fx.draft().expect("draft");
         assert_eq!(std::fs::read_to_string(&newer).unwrap(), "mine more a\n", "drafted first");
-        if newer != draft {
-            assert!(!draft.exists(), "the older draft is removed");
-        }
+        assert_ne!(newer, draft, "each draft gets a fresh name");
         assert!(fx.doc.isDocumentEdited());
     });
 }
@@ -935,6 +949,10 @@ fn deleted_file_holds() {
         assert!(fx.autosave(true));
         assert!(!fx.path.exists(), "autosave does not recreate the file");
         assert_eq!(std::fs::read_to_string(fx.draft().expect("draft")).unwrap(), "mine a\n");
+        // ⌘S writes it back in place (not AppKit's "location cannot be determined").
+        fx.save();
+        assert_eq!(fx.disk(), "mine a\n");
+        assert_eq!(fx.doc.hold(), None);
         assert_eq!(fx.text(), "mine a\n");
     });
 }
@@ -978,6 +996,103 @@ fn close_while_held_keeps_document() {
         assert_eq!(probe.ivars().get(), Some(false), "a held document refuses to close");
         assert_eq!(fx.disk(), "theirs\n");
         assert_eq!(fx.text(), "mine a\n");
+    });
+}
+
+/// A document reopened from a recovery draft (as AppKit does after a crash),
+/// with `original` on disk at its file URL (None: missing).
+fn recovered(name: &str, original: Option<&[u8]>, f: impl FnOnce(&Retained<PrasastiDocument>, &std::path::Path)) {
+    let dir = std::env::temp_dir().join(format!("prasasti-{name}-{}-{:?}", std::process::id(), Instant::now()).replace([' ', ':', '{', '}', ','], ""));
+    std::fs::create_dir_all(&dir).unwrap();
+    let path = dir.join("doc.md");
+    if let Some(b) = original {
+        std::fs::write(&path, b).unwrap();
+    }
+    let drafts_before = draft_names();
+    let draft = dir.join("draft.md");
+    std::fs::write(&draft, "mine\n").unwrap();
+    let url = NSURL::fileURLWithPath(&NSString::from_str(path.to_str().unwrap()));
+    let draft_url = NSURL::fileURLWithPath(&NSString::from_str(draft.to_str().unwrap()));
+    // SAFETY: NSDocument's initializer for reopening autosaved contents.
+    let doc: Result<Retained<PrasastiDocument>, Retained<NSError>> = unsafe {
+        objc2::msg_send![<PrasastiDocument as objc2::MainThreadOnly>::alloc(mtm()), initForURL: Some(&*url), withContentsOfURL: &*draft_url, ofType: ns_string!(MD), error: _]
+    };
+    let doc = doc.expect("reopen from draft");
+    let r = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| f(&doc, &path)));
+    doc.close();
+    remove_new_drafts(&drafts_before);
+    let _ = std::fs::remove_dir_all(&dir);
+    r.unwrap_or_else(|e| std::panic::resume_unwind(e))
+}
+
+fn autosave_doc(doc: &PrasastiDocument) {
+    let done = std::rc::Rc::new(std::cell::Cell::new(false));
+    let d = done.clone();
+    let block = block2::RcBlock::new(move |_e: *mut NSError| d.set(true));
+    doc.autosaveWithImplicitCancellability_completionHandler(true, &block);
+    wait_until(|| done.get());
+}
+
+fn recovered_draft_keeps_hold() {
+    let cases: [(&str, Option<&[u8]>, HoldReason); 3] = [
+        ("rec-crlf", Some(b"a\r\nb"), HoldReason::LineEndings),
+        ("rec-missing", None, HoldReason::Deleted),
+        ("rec-changed", Some(b"theirs\n"), HoldReason::ExternalChange),
+    ];
+    for (name, original, want) in cases {
+        recovered(name, original, |doc, path| {
+            assert_eq!(doc.text().to_string(), "mine\n");
+            assert_eq!(doc.hold(), Some(want), "{name}");
+            assert!(doc.isDocumentEdited(), "{name}: recovered text is unsaved");
+            // Our own bookkeeping must not call the original "our write".
+            doc.disk_changed();
+            assert_eq!(doc.hold(), Some(want), "{name}");
+            autosave_doc(doc);
+            assert_eq!(std::fs::read(path).ok().as_deref(), original, "{name}: original untouched");
+        });
+    }
+}
+
+fn drafts_rotate_keeping_two() {
+    on_disk("rotate", "a\n", |fx| {
+        fx.type_text("mine ");
+        later();
+        fx.write("theirs\n");
+        fx.doc.disk_changed();
+        let mut drafts = Vec::new();
+        for _ in 0..3 {
+            assert!(fx.autosave(true));
+            drafts.push(fx.draft().expect("draft"));
+        }
+        assert!(!drafts[0].exists(), "oldest removed");
+        assert!(drafts[1].exists(), "previous kept until the next rotation");
+        assert!(drafts[2].exists(), "latest");
+        fx.doc.resolve_external(false);
+        fx.save();
+        assert!(drafts.iter().all(|d| !d.exists()), "Save removes every draft");
+    });
+}
+
+fn hold_change_replaces_sheet() {
+    on_disk("sheet-swap", "a\n", |fx| {
+        document::SHEETS_ENABLED.store(true, std::sync::atomic::Ordering::SeqCst);
+        fx.type_text("mine ");
+        later();
+        fx.write("theirs\n");
+        fx.doc.disk_changed();
+        let _ = sheet_button(&fx.win, "Reload");
+        std::fs::remove_file(&fx.path).unwrap();
+        fx.doc.disk_changed();
+        wait_until(|| {
+            fx.win.attachedSheet().and_then(|s| s.contentView()).is_some_and(|v| texts_in(&v).iter().any(|t| t == "Close"))
+        });
+        let texts = texts_in(&fx.win.attachedSheet().unwrap().contentView().unwrap());
+        assert!(!texts.iter().any(|t| t == "Reload"), "stale sheet gone: {texts:?}");
+        assert_eq!(fx.doc.hold(), Some(HoldReason::Deleted));
+        assert_eq!(fx.text(), "mine a\n");
+        click(&sheet_button(&fx.win, "Save"));
+        wait_until(|| fx.path.exists() && !fx.doc.isDocumentEdited());
+        assert_eq!(fx.disk(), "mine a\n");
     });
 }
 
@@ -1137,7 +1252,10 @@ fn presenter_reloads_clean_doc() {
 }
 
 fn main() {
-    let _app = NSApplication::sharedApplication(mtm());
+    let app = NSApplication::sharedApplication(mtm());
+    // Pin the light (Aqua) appearance before any window: colour assertions use
+    // the light palette and must not depend on the system's Dark mode setting.
+    app.setAppearance(objc2_app_kit::NSAppearance::appearanceNamed(unsafe { objc2_app_kit::NSAppearanceNameAqua }).as_deref());
     // Never the user's real defaults domain.
     settings::set_defaults(Some(test_defaults()));
     fresh_defaults();
@@ -1198,6 +1316,9 @@ fn main() {
         ("close_while_held_keeps_document", close_while_held_keeps_document),
         ("sheet_keep_mine_button", sheet_keep_mine_button),
         ("deleted_sheet_save_writes_back", deleted_sheet_save_writes_back),
+        ("recovered_draft_keeps_hold", recovered_draft_keeps_hold),
+        ("drafts_rotate_keeping_two", drafts_rotate_keeping_two),
+        ("hold_change_replaces_sheet", hold_change_replaces_sheet),
         ("presenter_reloads_clean_doc", presenter_reloads_clean_doc),
     ];
     let mut failed = 0;

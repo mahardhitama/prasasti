@@ -4,7 +4,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 
 use block2::{DynBlock, RcBlock};
 
-use objc2::rc::Retained;
+use objc2::rc::{Allocated, Retained};
 use objc2::runtime::{AnyObject, Bool, Sel};
 use objc2::{DefinedClass, MainThreadOnly, Message, define_class, msg_send, sel};
 use objc2_app_kit::{
@@ -46,6 +46,27 @@ pub struct Ivars {
     /// The text until a window exists; afterwards the editor's storage is the truth.
     text: RefCell<Retained<NSString>>,
     editor: RefCell<Option<Retained<EditorView>>>,
+    /// The draft before the current one: kept until the next rotation succeeds,
+    /// so restorable state never names a file already deleted.
+    previous_draft: RefCell<Option<String>>,
+    /// Our open sheet (for which hold) and a counter that retires stale ones.
+    sheet: RefCell<Option<(HoldReason, Retained<NSWindow>)>>,
+    sheet_gen: Cell<u64>,
+}
+
+impl Ivars {
+    fn new() -> Self {
+        Self {
+            autosave_hold: Cell::new(None),
+            last_known: RefCell::new(None),
+            pending: RefCell::new(None),
+            text: RefCell::new(NSString::new()),
+            editor: RefCell::new(None),
+            previous_draft: RefCell::new(None),
+            sheet: RefCell::new(None),
+            sheet_gen: Cell::new(0),
+        }
+    }
 }
 
 define_class!(
@@ -58,6 +79,34 @@ define_class!(
     unsafe impl NSObjectProtocol for PrasastiDocument {}
 
     impl PrasastiDocument {
+        // Every NSDocument initializer (the document controller's included)
+        // runs `init` first, so the ivars are always set here.
+        #[unsafe(method_id(init))]
+        fn init(this: Allocated<Self>) -> Option<Retained<Self>> {
+            let this = this.set_ivars(Ivars::new());
+            unsafe { msg_send![super(this), init] }
+        }
+
+        // AppKit reports reopening a recovery draft (after a crash: contents
+        // read from a file other than fileURL) as ReadOtherContents.
+        #[unsafe(method(updateChangeCount:))]
+        fn update_change_count(&self, change: NSDocumentChangeType) {
+            unsafe { msg_send![super(self), updateChangeCount: change] }
+            if change == NSDocumentChangeType::ChangeReadOtherContents {
+                guarded(|| self.recovered_from_draft());
+            }
+        }
+
+        #[unsafe(method(saveDocument:))]
+        fn save_document(&self, sender: Option<&AnyObject>) {
+            if self.hold() == Some(HoldReason::Deleted) {
+                // AppKit would ask for a new location; the file belongs where it was.
+                guarded(|| self.save_back());
+            } else {
+                unsafe { msg_send![super(self), saveDocument: sender] }
+            }
+        }
+
         #[unsafe(method(autosavesInPlace))]
         fn autosaves_in_place() -> bool {
             true
@@ -138,24 +187,11 @@ define_class!(
 
         #[unsafe(method(autosaveWithImplicitCancellability:completionHandler:))]
         fn autosave(&self, cancellable: bool, handler: &DynBlock<dyn Fn(*mut NSError)>) {
-            match self.hold() {
-                None => unsafe {
-                    msg_send![super(self), autosaveWithImplicitCancellability: cancellable, completionHandler: handler]
-                },
-                // The file itself is never written while held; a recovery draft
-                // is, so a crash or kill can't lose the text.
-                Some(reason) => {
-                    let handler = handler.copy();
-                    self.write_draft(move |draft_err| {
-                        if cancellable {
-                            handler.call((draft_err,));
-                        } else {
-                            // A forced one (close, quit) must fail even after the
-                            // draft: success would let AppKit close the window.
-                            call_with_error(&handler, &held_error(reason));
-                        }
-                    });
-                }
+            let handler = handler.copy();
+            let inner = handler.clone();
+            // The handler must run exactly once; a panic before handing it on reports failure.
+            if guarded(|| self.autosave_held_aware(cancellable, inner)).is_none() {
+                call_with_error(&handler, &internal_error());
             }
         }
 
@@ -167,22 +203,10 @@ define_class!(
             op: NSSaveOperationType,
             handler: &DynBlock<dyn Fn(*mut NSError)>,
         ) {
-            // Backstop for any in-place autosave that does not go through the method above.
-            if op == NSSaveOperationType::AutosaveInPlaceOperation {
-                if let Some(reason) = self.hold() {
-                    return call_with_error(handler, &held_error(reason));
-                }
-            }
-            let this = self.retain();
             let handler = handler.copy();
-            let done = RcBlock::new(move |err: *mut NSError| {
-                if err.is_null() {
-                    guarded(|| this.saved(op));
-                }
-                handler.call((err,));
-            });
-            unsafe {
-                msg_send![super(self), saveToURL: url, ofType: type_name, forSaveOperation: op, completionHandler: &*done]
+            let inner = handler.clone();
+            if guarded(|| self.save_held_aware(url, type_name, op, inner)).is_none() {
+                call_with_error(&handler, &internal_error());
             }
         }
 
@@ -198,7 +222,7 @@ define_class!(
 
         #[unsafe(method(presentedItemDidMoveToURL:))]
         fn presented_item_did_move(&self, url: &NSURL) {
-            let trashed = guarded(|| url.path().is_some_and(|p| p.to_string().contains("/.Trash"))).unwrap_or(false);
+            let trashed = guarded(|| in_trash(url)).unwrap_or(false);
             if trashed {
                 // Moved to the Trash counts as deleted; fileURL stays put, so Save
                 // writes the text back where it was.
@@ -232,15 +256,59 @@ define_class!(
 
 impl PrasastiDocument {
     pub fn new(mtm: MainThreadMarker) -> Retained<Self> {
-        let this = Self::alloc(mtm).set_ivars(Ivars {
-            autosave_hold: Cell::new(None),
-            last_known: RefCell::new(None),
-            pending: RefCell::new(None),
-            text: RefCell::new(NSString::new()),
-            editor: RefCell::new(None),
+        // SAFETY: our `init` override sets the ivars.
+        unsafe { msg_send![Self::alloc(mtm), init] }
+    }
+
+    fn autosave_held_aware(&self, cancellable: bool, handler: RcBlock<dyn Fn(*mut NSError)>) {
+        match self.hold() {
+            None => unsafe {
+                msg_send![super(self), autosaveWithImplicitCancellability: cancellable, completionHandler: &*handler]
+            },
+            // The file itself is never written while held; a recovery draft
+            // is, so a crash or kill can't lose the text.
+            Some(reason) => self.write_draft(move |draft_err| {
+                if cancellable {
+                    handler.call((draft_err,));
+                } else {
+                    // A forced one (close, quit) must fail even after the
+                    // draft: success would let AppKit close the window.
+                    call_with_error(&handler, &held_error(reason));
+                }
+            }),
+        }
+    }
+
+    fn save_held_aware(&self, url: &NSURL, kind: &NSString, op: NSSaveOperationType, handler: RcBlock<dyn Fn(*mut NSError)>) {
+        // Backstop for any in-place autosave that does not go through `autosave`.
+        if op == NSSaveOperationType::AutosaveInPlaceOperation {
+            if let Some(reason) = self.hold() {
+                return call_with_error(&handler, &held_error(reason));
+            }
+        }
+        let this = self.retain();
+        let done = RcBlock::new(move |err: *mut NSError| {
+            if err.is_null() {
+                guarded(|| this.saved(op));
+            }
+            handler.call((err,));
         });
-        // SAFETY: NSDocument's designated initializer.
-        unsafe { msg_send![super(this), init] }
+        unsafe { msg_send![super(self), saveToURL: url, ofType: kind, forSaveOperation: op, completionHandler: &*done] }
+    }
+
+    /// Reopened from a recovery draft: the draft was written because autosave
+    /// was held, so hold it again, judged against the original file.
+    fn recovered_from_draft(&self) {
+        let original = self.path().map(std::fs::read);
+        let (hold, known) = match original {
+            Some(Ok(bytes)) if bytes.contains(&b'\r') => (HoldReason::LineEndings, Some(bytes)),
+            Some(Ok(bytes)) => (HoldReason::ExternalChange, Some(bytes)),
+            Some(Err(e)) if e.kind() == std::io::ErrorKind::NotFound => (HoldReason::Deleted, None),
+            _ => (HoldReason::ExternalChange, None),
+        };
+        *self.ivars().last_known.borrow_mut() = known;
+        self.set_hold(Some(hold));
+        self.updateChangeCount(NSDocumentChangeType::ChangeDone);
     }
 
     /// The current text: the editor's when a window exists, else the loaded text.
@@ -274,6 +342,7 @@ impl PrasastiDocument {
         self.set_hold(Some(HoldReason::ExternalChange));
         let this = self.retain();
         self.sheet(
+            HoldReason::ExternalChange,
             "The file changed on disk.",
             "Reload discards your changes. Keep Mine keeps them; auto-save stays paused until you save.",
             ["Reload", "Keep Mine"],
@@ -307,6 +376,7 @@ impl PrasastiDocument {
         self.set_hold(Some(HoldReason::Deleted));
         let this = self.retain();
         self.sheet(
+            HoldReason::Deleted,
             "The file was deleted or moved to the Trash.",
             "Save writes your text back to disk. Close discards it.",
             ["Save", "Close"],
@@ -342,12 +412,17 @@ impl PrasastiDocument {
         let (Some(url), Some(kind)) = (self.new_draft_url(), self.fileType()) else {
             return done(ptr::null_mut());
         };
-        let previous = self.autosavedContentsFileURL().and_then(|u| u.path());
+        let replaced = self.autosavedContentsFileURL().and_then(|u| u.path()).map(|p| p.to_string());
+        let this = self.retain();
         let done = RcBlock::new(move |err: *mut NSError| {
             if err.is_null() {
-                if let Some(p) = &previous {
-                    let _ = std::fs::remove_file(p.to_string());
-                }
+                guarded(|| {
+                    // Keep the newest two: the previous one goes only now.
+                    if let Some(oldest) = this.ivars().previous_draft.replace(replaced.clone()) {
+                        this.remove_draft(&oldest);
+                    }
+                    this.invalidateRestorableState();
+                });
             }
             done(err);
         });
@@ -355,25 +430,32 @@ impl PrasastiDocument {
     }
 
     fn new_draft_url(&self) -> Option<Retained<NSURL>> {
-        let dir = NSFileManager::defaultManager()
-            .URLForDirectory_inDomain_appropriateForURL_create_error(
-                NSSearchPathDirectory::AutosavedInformationDirectory,
-                NSSearchPathDomainMask::UserDomainMask,
-                None,
-                true,
-            )
-            .ok()?;
+        let dir = drafts_dir_url(true)?;
         let unique = NSProcessInfo::processInfo().globallyUniqueString();
         let name = format!("{} (Autosaved {unique}).md", self.displayName());
         Some(dir.URLByAppendingPathComponent(&NSString::from_str(&name))?)
     }
 
-    /// Deletes the recovery draft once the file holds the truth again.
+    /// Deletes the recovery drafts once the file holds the truth again.
     fn forget_draft(&self) {
         if let Some(path) = self.autosavedContentsFileURL().and_then(|u| u.path()) {
-            let _ = std::fs::remove_file(path.to_string());
+            self.remove_draft(&path.to_string());
+            self.setAutosavedContentsFileURL(None);
         }
-        self.setAutosavedContentsFileURL(None);
+        if let Some(path) = self.ivars().previous_draft.take() {
+            self.remove_draft(&path);
+        }
+        self.invalidateRestorableState();
+    }
+
+    /// Removes `path` only if it is a draft: inside Autosave Information and not the file itself.
+    fn remove_draft(&self, path: &str) {
+        let in_drafts = autosave_dir().is_some_and(|dir| path.starts_with(&format!("{dir}/")));
+        if in_drafts && self.path().as_deref() != Some(path) {
+            let _ = std::fs::remove_file(path);
+        } else {
+            eprintln!("prasasti: not removing {path}: not a recovery draft");
+        }
     }
 
     /// Saves to the (deleted) file's own URL. `saveDocument:` would instead ask
@@ -384,10 +466,12 @@ impl PrasastiDocument {
         let done = RcBlock::new(move |err: *mut NSError| {
             // SAFETY: the handler's error is nil or a valid NSError.
             if let Some(err) = unsafe { err.as_ref() } {
-                // The hold stays and the text is untouched; tell the user.
-                if let Some(win) = this.windowControllers().firstObject().and_then(|c| c.window()) {
-                    NSAlert::alertWithError(err, this.mtm()).beginSheetModalForWindow_completionHandler(&win, None);
-                }
+                guarded(|| {
+                    // The hold stays and the text is untouched; tell the user.
+                    if let Some(win) = this.windowControllers().firstObject().and_then(|c| c.window()) {
+                        NSAlert::alertWithError(err, this.mtm()).beginSheetModalForWindow_completionHandler(&win, None);
+                    }
+                });
             }
         });
         self.saveToURL_ofType_forSaveOperation_completionHandler(&url, &kind, NSSaveOperationType::SaveOperation, &done);
@@ -418,6 +502,8 @@ impl PrasastiDocument {
         let pending = self.ivars().pending.take();
         if matches!(op, Op::SaveOperation | Op::SaveAsOperation) {
             self.set_hold(None);
+            // NSDocument drops the current draft itself; the previous one is ours.
+            self.forget_draft();
         }
         let writes_file = matches!(op, Op::SaveOperation | Op::SaveAsOperation | Op::AutosaveInPlaceOperation | Op::AutosaveAsOperation);
         if writes_file && pending.is_some() {
@@ -429,14 +515,22 @@ impl PrasastiDocument {
         Some(self.fileURL()?.path()?.to_string())
     }
 
-    fn sheet(&self, message: &str, info: &str, buttons: [&str; 2], on: impl Fn(NSModalResponse) + 'static) {
+    /// Shows our sheet for `reason`, replacing a stale one of ours for another reason.
+    fn sheet(&self, reason: HoldReason, message: &str, info: &str, buttons: [&str; 2], on: impl Fn(NSModalResponse) + 'static) {
         if !SHEETS_ENABLED.load(Ordering::SeqCst) {
             return;
         }
         // Our own window only: a closed document must never borrow another's.
         let Some(win) = self.windowControllers().firstObject().and_then(|c| c.window()) else { return };
-        if win.attachedSheet().is_some() {
-            return; // the open sheet already covers it
+        let ivars = self.ivars();
+        let open = ivars.sheet.borrow().clone().filter(|(_, w)| win.attachedSheet().is_some_and(|a| a == *w));
+        if let Some((open_reason, open_window)) = open {
+            if open_reason == reason {
+                return; // already asking this
+            }
+            // Retire it first, so its handler ignores the end below.
+            ivars.sheet_gen.set(ivars.sheet_gen.get() + 1);
+            win.endSheet(&open_window);
         }
         let alert = NSAlert::new(self.mtm());
         alert.setMessageText(&NSString::from_str(message));
@@ -444,9 +538,17 @@ impl PrasastiDocument {
         for b in buttons {
             alert.addButtonWithTitle(&NSString::from_str(b));
         }
+        ivars.sheet_gen.set(ivars.sheet_gen.get() + 1);
+        let generation = ivars.sheet_gen.get();
+        *ivars.sheet.borrow_mut() = Some((reason, alert.window()));
+        let this = self.retain();
         let done = RcBlock::new(move |r: NSModalResponse| {
-            guarded(|| on(r));
+            if this.ivars().sheet_gen.get() == generation {
+                *this.ivars().sheet.borrow_mut() = None;
+                guarded(|| on(r));
+            }
         });
+        // Another app sheet (a save panel, say) queues ours behind it.
         alert.beginSheetModalForWindow_completionHandler(&win, Some(&done));
     }
 
@@ -478,6 +580,42 @@ pub fn window_content(frame: NSRect) -> (Retained<NSStackView>, Retained<EditorV
     (stack, editor)
 }
 
+fn drafts_dir_url(create: bool) -> Option<Retained<NSURL>> {
+    NSFileManager::defaultManager()
+        .URLForDirectory_inDomain_appropriateForURL_create_error(
+            NSSearchPathDirectory::AutosavedInformationDirectory,
+            NSSearchPathDomainMask::UserDomainMask,
+            None,
+            create,
+        )
+        .ok()
+}
+
+fn autosave_dir() -> Option<String> {
+    Some(drafts_dir_url(false)?.path()?.to_string())
+}
+
+/// Whether `url` lies in the Trash of its volume.
+fn in_trash(url: &NSURL) -> bool {
+    let trash = NSFileManager::defaultManager()
+        .URLForDirectory_inDomain_appropriateForURL_create_error(
+            NSSearchPathDirectory::TrashDirectory,
+            NSSearchPathDomainMask::UserDomainMask,
+            Some(url),
+            false,
+        )
+        .ok()
+        .and_then(|t| t.path());
+    match (trash, url.path()) {
+        (Some(t), Some(p)) => p.to_string().starts_with(&format!("{t}/")),
+        _ => false,
+    }
+}
+
+fn internal_error() -> Retained<NSError> {
+    error_with("Praśasti hit an internal error while saving. Your text is still open; try File > Save.")
+}
+
 /// The file's modification date as NSDocument reads it, uncached.
 fn disk_date(path: &str) -> Option<Retained<NSDate>> {
     let url = NSURL::fileURLWithPath(&NSString::from_str(path));
@@ -492,10 +630,13 @@ fn held_error(reason: HoldReason) -> Retained<NSError> {
         HoldReason::ExternalChange => "the file changed on disk",
         HoldReason::Deleted => "the file was deleted",
     };
-    let msg = format!("Auto-save is paused because {why}. Choose File > Save to keep your changes.");
+    error_with(&format!("Auto-save is paused because {why}. Choose File > Save to keep your changes."))
+}
+
+fn error_with(msg: &str) -> Retained<NSError> {
     let info = NSDictionary::<NSString, AnyObject>::from_slices(
         &[unsafe { NSLocalizedDescriptionKey }],
-        &[&*NSString::from_str(&msg) as &AnyObject],
+        &[&*NSString::from_str(msg) as &AnyObject],
     );
     unsafe { NSError::errorWithDomain_code_userInfo(NSCocoaErrorDomain, NSFileWriteUnknownError, Some(&info)) }
 }
