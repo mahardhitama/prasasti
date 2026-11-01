@@ -49,20 +49,20 @@ Inline styles: *italic*, **bold**, ***both***, ~~strike~~, `code`, and escaped c
 2. Second
 3. Third
 
-7. Ordered from seven
-8. Eight
-9. Nine
+7) Ordered from seven
+8) Eight
+9) Nine
 
-- Level one
+* Level one
   1. Level two, ordered
      - Level three, unordered
      - Another level three
   2. Level two again
-- Level one again
+* Level one again
 
-- [x] Done task
-- [ ] Open task
-- [ ] Another open task
++ [x] Done task
++ [ ] Open task
++ [ ] Another open task
 
 - A loose item with two paragraphs.
 
@@ -241,6 +241,6 @@ CSP probe, which must never run:
 
 كتابة النص بالعربية تسير من اليمين إلى اليسار، وهذه الفقرة طويلة بما يكفي لتلتف على عدة أسطر عند عرض العمود المحدد في المحرر، مع كلمات كثيرة تفصل بينها مسافات.
 
-Combining marks: café (e plus U+0301), naïve, Zürich, and a long run of accented words such as résumé, façade, jalapeño, and Ångström written with combining accents, repeated to wrap: résumé façâde jalapeño Ångström résumé façâde jalapeño.
+Combining marks: café (e plus U+0301), naïve, Zürich, and a long run of accented words such as résumé, façade, jalapeño, and Ångström written with combining accents, repeated to wrap: résumé façade jalapeño Ångström résumé façade jalapeño.
 
 Emoji: 😀 🎉 👩‍💻 🇮🇩 👨‍👩‍👧‍👦 ✍️ plus more words around them so that the line wraps past the column width, 😀 🎉 👩‍💻 🇮🇩 ✍️ and so on until the end of the line.
