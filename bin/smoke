@@ -92,6 +92,9 @@ function run(argv) {
 
     const ta = () => win().scrollAreas[0].textAreas[0]
     keys('type', () => {
+        // A document read from a file opens in Preview; ⌘E switches to Edit.
+        se.keystroke('e', { using: 'command down' })
+        wait(2, () => ta().exists())
         ta().focused = true
         se.keyCode(125, { using: 'command down' }) // ⌘↓: end of text
         se.keystroke('hello')
