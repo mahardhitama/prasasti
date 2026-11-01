@@ -29,7 +29,7 @@ const NEWLINE: u16 = b'\n' as u16;
 const OBJECT_REPLACEMENT: u16 = 0xFFFC;
 
 /// PCRE `\s` without the Unicode-properties option.
-fn ascii_space(u: u16) -> bool {
+pub(super) fn ascii_space(u: u16) -> bool {
     u == 0x20 || (0x09..=0x0D).contains(&u)
 }
 
@@ -96,7 +96,7 @@ pub fn code_spans(text: &[u16]) -> Vec<Range> {
 }
 
 /// `^\s{0,3}([-*_])(?:\s*\1){2,}\s*$`
-fn is_thematic_break(t: &[u16]) -> bool {
+pub fn is_thematic_break(t: &[u16]) -> bool {
     let lead = t.iter().take(3).take_while(|&&u| ascii_space(u)).count();
     let Some(&marker) = t.get(lead) else { return false };
     if ![b'-' as u16, STAR, UNDERSCORE].contains(&marker) {
