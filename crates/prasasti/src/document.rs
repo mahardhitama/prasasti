@@ -108,6 +108,11 @@ define_class!(
 
         #[unsafe(method(saveDocument:))]
         fn save_document(&self, sender: Option<&AnyObject>) {
+            // A change the presenter missed gets our sheet, not AppKit's
+            // "changed by another application" alert; nothing is written.
+            if guarded(|| self.check_disk()).unwrap_or(false) {
+                return;
+            }
             if self.hold() == Some(HoldReason::Deleted) {
                 // AppKit would ask for a new location; the file belongs where it was.
                 guarded(|| self.save_back());
@@ -287,6 +292,7 @@ impl PrasastiDocument {
     }
 
     fn autosave_held_aware(&self, cancellable: bool, handler: RcBlock<dyn Fn(*mut NSError)>) {
+        self.check_disk();
         match self.hold() {
             None => unsafe {
                 msg_send![super(self), autosaveWithImplicitCancellability: cancellable, completionHandler: &*handler]
@@ -354,6 +360,25 @@ impl PrasastiDocument {
 
     pub fn hold(&self) -> Option<HoldReason> {
         self.ivars().autosave_hold.get()
+    }
+
+    /// Before an in-place write: if the file no longer holds what we last read
+    /// or wrote (an external write the presenter missed), handles it as an
+    /// external change now. True if it did.
+    fn check_disk(&self) -> bool {
+        let Some(path) = self.path() else { return false };
+        if self.hold().is_some() {
+            return false;
+        }
+        let differs = match (&*self.ivars().last_known.borrow(), std::fs::read(&path)) {
+            (None, _) => false,
+            (Some(known), Ok(bytes)) => *known != bytes,
+            (Some(_), Err(e)) => e.kind() == std::io::ErrorKind::NotFound,
+        };
+        if differs {
+            self.disk_changed();
+        }
+        differs
     }
 
     /// Compares the file with what we last read or wrote: silently reloads a
@@ -540,6 +565,11 @@ impl PrasastiDocument {
         let writes_file = matches!(op, Op::SaveOperation | Op::SaveAsOperation | Op::AutosaveInPlaceOperation | Op::AutosaveAsOperation);
         if writes_file && pending.is_some() {
             *self.ivars().last_known.borrow_mut() = pending;
+            // A write landing just after ours may never reach the presenter.
+            // SAFETY: `prasastiDiskChanged` is a no-argument void method of ours.
+            unsafe {
+                let _: () = msg_send![self, performSelector: sel!(prasastiDiskChanged), withObject: None::<&AnyObject>, afterDelay: 1.0f64];
+            }
         }
     }
 

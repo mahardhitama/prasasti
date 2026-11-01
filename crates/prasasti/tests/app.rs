@@ -1388,6 +1388,61 @@ fn typing_during_autosave_counts() {
     });
 }
 
+// ---- Disk checked before in-place writes (external writes the presenter missed) ----
+
+fn autosave_checks_disk_first() {
+    on_disk("autosave-check", "a\n", |fx| {
+        fx.type_text("mine ");
+        later();
+        fx.write("theirs\n"); // no presenter event, no disk_changed
+        assert!(fx.autosave(true));
+        assert_eq!(fx.disk(), "theirs\n", "the external text is not overwritten");
+        assert_eq!(fx.doc.hold(), Some(HoldReason::ExternalChange));
+        assert_eq!(std::fs::read_to_string(fx.draft().expect("draft")).unwrap(), "mine a\n");
+    });
+}
+
+fn autosave_checks_missing_file() {
+    on_disk("autosave-missing", "a\n", |fx| {
+        fx.type_text("mine ");
+        std::fs::remove_file(&fx.path).unwrap();
+        assert!(fx.autosave(true));
+        assert!(!fx.path.exists(), "autosave does not recreate the file");
+        assert_eq!(fx.doc.hold(), Some(HoldReason::Deleted));
+    });
+}
+
+fn save_checks_disk_first() {
+    on_disk("save-check", "a\n", |fx| {
+        fx.type_text("mine ");
+        later();
+        fx.write("theirs\n");
+        ui::shortcut(&fx.win, "s", CMD);
+        ui::pump(0.2);
+        assert_eq!(fx.doc.hold(), Some(HoldReason::ExternalChange));
+        assert_eq!(fx.disk(), "theirs\n", "⌘S asks first instead of writing");
+        assert!(fx.doc.isDocumentEdited());
+        // Keep Mine, then Save, overwrites deliberately.
+        fx.doc.resolve_external(false);
+        fx.save();
+        assert_eq!(fx.disk(), "mine a\n");
+    });
+}
+
+fn rechecks_disk_after_save() {
+    on_disk("recheck", "a\n", |fx| {
+        fx.type_text("b");
+        assert!(fx.autosave(true));
+        fx.type_text("c");
+        later();
+        fx.write("theirs\n"); // lands just after ours; the presenter misses it
+        assert_eq!(fx.doc.hold(), None);
+        ui::pump(1.3);
+        assert_eq!(fx.doc.hold(), Some(HoldReason::ExternalChange), "noticed about 1 s after the save");
+        assert_eq!(fx.text(), "bca\n");
+    });
+}
+
 fn presenter_reloads_clean_doc() {
     on_disk("presenter", "a\n", |fx| {
         // The document controller registers it as a file presenter, as in the app.
@@ -1497,6 +1552,10 @@ fn main() {
         ("info_plist_classes_resolve", info_plist_classes_resolve),
         ("typing_after_autosave_counts", typing_after_autosave_counts),
         ("typing_during_autosave_counts", typing_during_autosave_counts),
+        ("autosave_checks_disk_first", autosave_checks_disk_first),
+        ("autosave_checks_missing_file", autosave_checks_missing_file),
+        ("save_checks_disk_first", save_checks_disk_first),
+        ("rechecks_disk_after_save", rechecks_disk_after_save),
     ];
     let mut failed = 0;
     for (name, f) in tests {
