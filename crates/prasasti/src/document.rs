@@ -16,6 +16,7 @@ use prasasti_core::file::{decode, normalize_newlines, saves_unchanged};
 
 use crate::editor::{EditorView, editor_in_scroll};
 use crate::find_bar::FindBar;
+use crate::footer::Footer;
 use crate::util::guarded;
 
 /// Why autosave must not write the file right now.
@@ -153,12 +154,13 @@ impl PrasastiDocument {
     }
 }
 
-/// The window's content, top to bottom: the (hidden) find bar, then the editor.
+/// The window's content, top to bottom: the (hidden) find bar, the editor, the footer.
 pub fn window_content(frame: NSRect) -> (Retained<NSStackView>, Retained<EditorView>) {
     let mtm = MainThreadMarker::new().expect("windows are built on the main thread");
     let (scroll, editor) = editor_in_scroll(frame);
     let bar = FindBar::new(mtm, &editor);
-    let stack = NSStackView::stackViewWithViews(&NSArray::from_slice(&[&*bar as &NSView, &scroll]), mtm);
+    let footer = Footer::new(mtm, &editor);
+    let stack = NSStackView::stackViewWithViews(&NSArray::from_slice(&[&*bar as &NSView, &scroll, &footer]), mtm);
     stack.setFrame(frame);
     stack.setOrientation(NSUserInterfaceLayoutOrientation::Vertical);
     stack.setAlignment(NSLayoutAttribute::Width);

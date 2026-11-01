@@ -119,8 +119,8 @@ fn find_item(menu: &NSMenu, want: &(String, NSEventModifierFlags)) -> Option<Ret
 }
 
 /// Runs the main-menu item bound to `key` + `mods`, sending its action to the
-/// first responder in the window's chain that implements it, as a nil-targeted
-/// menu action would. Panics if no item has that binding or nothing handled it.
+/// item's own target if it has one, else to the first responder in the
+/// window's chain that implements it, as a nil-targeted menu action would. Panics if no item has that binding or nothing handled it.
 /// (The test app is never active, so the window is never key and
 /// `performKeyEquivalent` would send nil-targeted actions nowhere.)
 pub fn shortcut(win: &NSWindow, key: &str, mods: NSEventModifierFlags) {
@@ -129,6 +129,12 @@ pub fn shortcut(win: &NSWindow, key: &str, mods: NSEventModifierFlags) {
     let item = find_item(&menu, &normalise(key, mods))
         .unwrap_or_else(|| panic!("no menu item bound to {key:?} {mods:?}"));
     let action = item.action().expect("item action");
+    if let Some(target) = item.target() {
+        // SAFETY: as below; an item with its own target ignores the chain.
+        let sent = unsafe { app.sendAction_to_from(action, Some(&target), Some(item.as_ref())) };
+        assert!(sent, "{target:?} did not handle {action:?}");
+        return;
+    }
     // AppKit's explicit-target send does not walk the chain, so find the target here.
     let mut target = win.firstResponder();
     while let Some(r) = target.as_deref().filter(|r| !r.respondsToSelector(action)) {

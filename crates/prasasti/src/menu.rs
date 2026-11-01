@@ -1,7 +1,7 @@
 use objc2::rc::Retained;
 use objc2::runtime::Sel;
 use objc2::{MainThreadOnly, sel};
-use objc2_app_kit::{NSApplication, NSEventModifierFlags, NSMenu, NSMenuItem};
+use objc2_app_kit::{NSApplication, NSEventModifierFlags, NSFontManager, NSMenu, NSMenuItem};
 use objc2_foundation::{MainThreadMarker, NSString};
 
 const CMD: NSEventModifierFlags = NSEventModifierFlags::Command;
@@ -96,6 +96,11 @@ pub fn install(app: &NSApplication, mtm: MainThreadMarker) {
         None,
         s("Show Fonts", sel!(orderFrontFontPanel:), "t", CMD),
     ]);
+    // No responder implements this; the font manager does, as in AppKit's own menus.
+    if let Some(fonts) = format.itemWithTitle(&NSString::from_str("Show Fonts")) {
+        // SAFETY: the shared font manager lives for the whole app.
+        unsafe { fonts.setTarget(Some(&NSFontManager::sharedFontManager(mtm))) };
+    }
     let view = menu(mtm, "View", &[
         s("Zoom In", sel!(zoomIn:), "=", CMD),
         s("Zoom Out", sel!(zoomOut:), "-", CMD),
@@ -103,6 +108,11 @@ pub fn install(app: &NSApplication, mtm: MainThreadMarker) {
         None,
         s("Enter Full Screen", sel!(toggleFullScreen:), "f", CTRL_CMD),
     ]);
+    // ⌘+ (Shift-= on US layouts) zooms in too, from a hidden item.
+    let plus = item(mtm, "Zoom In", Some(sel!(zoomIn:)), "+");
+    plus.setHidden(true);
+    plus.setAllowsKeyEquivalentWhenHidden(true);
+    view.insertItem_atIndex(&plus, 1);
     let window = menu(mtm, "Window", &[
         s("Minimize", sel!(performMiniaturize:), "m", CMD),
         s("Zoom", sel!(performZoom:), "", CMD),

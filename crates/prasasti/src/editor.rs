@@ -1,12 +1,14 @@
 use std::cell::{Cell, Ref, RefCell};
 use std::ptr::NonNull;
 
+use block2::RcBlock;
 use objc2::rc::{Retained, Weak};
 use objc2::runtime::{AnyObject, ProtocolObject};
 use objc2::{AnyThread, DefinedClass, MainThreadOnly, define_class, msg_send};
 use objc2_app_kit::{
     NSAppearanceCustomization, NSAppearanceNameAqua, NSAppearanceNameDarkAqua,
-    NSAutoresizingMaskOptions, NSBackgroundColorAttributeName, NSFont,
+    NSAutoresizingMaskOptions, NSBackgroundColorAttributeName, NSEvent, NSEventModifierFlags, NSFont,
+    NSFontManager,
     NSForegroundColorAttributeName, NSGlyphProperty, NSLayoutManager, NSLayoutManagerDelegate,
     NSPasteboard, NSPasteboardTypeString, NSResponder, NSScrollView, NSText, NSTextContainer,
     NSTextDelegate, NSTextInputClient, NSTextStorage, NSTextStorageDelegate,
@@ -14,15 +16,18 @@ use objc2_app_kit::{
 };
 
 use objc2_foundation::{
-    MainThreadMarker, NSArray, NSDictionary, NSInteger, NSNotification, NSObject,
+    MainThreadMarker, NSArray, NSDictionary, NSInteger, NSNotification, NSNotificationCenter, NSObject,
     NSNotFound, NSObjectProtocol, NSPoint, NSRange, NSRect, NSSize, NSString, NSUInteger,
 };
 
 use prasasti_core::edit::{self, Edit};
 use prasasti_core::file::normalize_newlines;
 use prasasti_core::list;
+use prasasti_core::zoom;
 
 use crate::find_bar::FindBar;
+use crate::footer::Footer;
+use crate::settings;
 use crate::styler::{Styler, hidden_key};
 use crate::theme::{Palette, base_font, palette};
 use crate::util::{guarded, to_u16};
@@ -37,6 +42,22 @@ pub struct Ivars {
     pal: RefCell<Palette>,
     /// The window's find bar, which repaints its matches after edits.
     find_bar: RefCell<Weak<FindBar>>,
+    footer: RefCell<Weak<Footer>>,
+    /// The font the styler uses, from the settings as of the last restyle.
+    font: RefCell<Retained<NSFont>>,
+    /// ⌘-scroll lines not yet turned into a zoom step.
+    wheel: Cell<f64>,
+    /// The settings-changed observation, removed when the editor goes.
+    observer: RefCell<Option<Observer>>,
+}
+
+struct Observer(Retained<ProtocolObject<dyn NSObjectProtocol>>);
+
+impl Drop for Observer {
+    fn drop(&mut self) {
+        // SAFETY: the token came from this centre's addObserverForName:….
+        unsafe { NSNotificationCenter::defaultCenter().removeObserver(self.0.as_ref()) };
+    }
 }
 
 define_class!(
@@ -59,10 +80,14 @@ define_class!(
             }
             let Ok(mut styler) = self.ivars().styler.try_borrow_mut() else { return };
             let pal = self.ivars().pal.borrow();
+            let font = self.ivars().font.borrow();
             // The selection moves after this; the end of the edit is where it lands.
-            guarded(|| styler.restyle_edit(storage, &base_font(), &pal, range, range.end()));
+            guarded(|| styler.restyle_edit(storage, &font, &pal, range, range.end()));
             if let Some(bar) = self.find_bar() {
                 guarded(|| bar.text_changed());
+            }
+            if let Some(footer) = self.footer() {
+                footer.text_changed();
             }
         }
     }
@@ -131,7 +156,8 @@ define_class!(
             }
             let Ok(mut styler) = self.ivars().styler.try_borrow_mut() else { return };
             let pal = self.ivars().pal.borrow();
-            guarded(|| styler.restyle_caret_move(self.storage(), &base_font(), &pal, old, new));
+            let font = self.ivars().font.borrow();
+            guarded(|| styler.restyle_caret_move(self.storage(), &font, &pal, old, new));
         }
     }
 
@@ -200,11 +226,51 @@ define_class!(
         #[unsafe(method(copyAsHTML:))]
         fn copy_as_html(&self, _sender: Option<&AnyObject>) {}
         #[unsafe(method(zoomIn:))]
-        fn zoom_in(&self, _sender: Option<&AnyObject>) {}
+        fn zoom_in(&self, _sender: Option<&AnyObject>) {
+            self.zoom_by(1);
+        }
         #[unsafe(method(zoomOut:))]
-        fn zoom_out(&self, _sender: Option<&AnyObject>) {}
+        fn zoom_out(&self, _sender: Option<&AnyObject>) {
+            self.zoom_by(-1);
+        }
         #[unsafe(method(resetZoom:))]
-        fn reset_zoom(&self, _sender: Option<&AnyObject>) {}
+        fn reset_zoom(&self, _sender: Option<&AnyObject>) {
+            self.zoom_by(0);
+        }
+
+        /// ⌘-scroll zooms one step per accumulated line; plain scroll scrolls.
+        #[unsafe(method(scrollWheel:))]
+        fn scroll_wheel(&self, event: &NSEvent) {
+            if !event.modifierFlags().contains(NSEventModifierFlags::Command) {
+                // SAFETY: NSResponder's own implementation, same signature.
+                let () = unsafe { msg_send![super(self), scrollWheel: event] };
+                return;
+            }
+            // Trackpads and Magic Mice report precise deltas in points, many
+            // small ones per gesture; a wheel reports whole lines. Count 10
+            // points as a line (NSScrollView's default line scroll) so a
+            // trackpad swipe zooms about as far as a few wheel clicks.
+            let dy = event.scrollingDeltaY();
+            let lines = if event.hasPreciseScrollingDeltas() { dy / 10.0 } else { dy };
+            let (rest, dir) = wheel_step(self.ivars().wheel.get(), lines);
+            self.ivars().wheel.set(rest);
+            if dir != 0 {
+                self.zoom_by(dir);
+            }
+        }
+
+        /// The font panel's choice: keep its family; the size comes from the zoom.
+        #[unsafe(method(changeFont:))]
+        fn change_font(&self, _sender: Option<&AnyObject>) {
+            guarded(|| {
+                let current = self.ivars().font.borrow().clone();
+                let chosen = NSFontManager::sharedFontManager(self.mtm()).convertFont(&current);
+                if let Some(family) = chosen.familyName() {
+                    // Posts the settings notification, which restyles every editor.
+                    settings::set_font_family(&family.to_string());
+                }
+            });
+        }
         #[unsafe(method(showFindBar:))]
         fn show_find_bar(&self, _sender: Option<&AnyObject>) {
             self.find_bar().map(|b| guarded(|| b.show(false)));
@@ -247,6 +313,13 @@ fn caret_before_hidden(storage: &NSTextStorage, old: NSRange, new: NSRange) -> N
     if start < new.location && start == step.end() { NSRange::new(start, 0) } else { new }
 }
 
+/// Adds `lines` to the pending scroll; a full line either way is one zoom
+/// step (its sign) and empties the pending amount.
+fn wheel_step(pending: f64, lines: f64) -> (f64, i32) {
+    let sum = pending + lines;
+    if sum.abs() >= 1.0 { (0.0, sum.signum() as i32) } else { (sum, 0) }
+}
+
 fn range_of(r: NSRange) -> std::ops::Range<usize> {
     r.location..r.end()
 }
@@ -262,6 +335,26 @@ impl EditorView {
 
     pub fn set_find_bar(&self, bar: &FindBar) {
         *self.ivars().find_bar.borrow_mut() = Weak::new(bar);
+    }
+
+    pub fn footer(&self) -> Option<Retained<Footer>> {
+        self.ivars().footer.borrow().load()
+    }
+
+    pub fn set_footer(&self, footer: &Footer) {
+        *self.ivars().footer.borrow_mut() = Weak::new(footer);
+    }
+
+    /// One zoom step in `direction`, or back to 100% for 0. The status shows
+    /// even at the ends of the range. Not an edit: no undo, no dirty flag.
+    fn zoom_by(&self, direction: i32) {
+        guarded(|| {
+            let z = if direction == 0 { 1.0 } else { zoom::step(settings::zoom(), direction) };
+            settings::set_zoom(z);
+            if let Some(footer) = self.footer() {
+                footer.set_status(&format!("Text size {}%", (z * 100.0).round()));
+            }
+        });
     }
 
     pub fn palette(&self) -> Ref<'_, Palette> {
@@ -324,6 +417,7 @@ impl EditorView {
             guarded(|| styler.restyle_all(self.storage(), &font, &pal, caret));
         }
         *self.ivars().pal.borrow_mut() = pal;
+        *self.ivars().font.borrow_mut() = font;
         if let Some(bar) = self.find_bar() {
             guarded(|| bar.paint());
         }
@@ -350,6 +444,10 @@ pub fn make_editor(frame: NSRect) -> Retained<EditorView> {
         caret: Cell::new(0),
         pal: RefCell::new(palette(false)),
         find_bar: RefCell::default(),
+        footer: RefCell::default(),
+        font: RefCell::new(base_font()),
+        wheel: Cell::new(0.0),
+        observer: RefCell::default(),
     });
     // SAFETY: designated initializer of NSTextView with matching argument types.
     let editor: Retained<EditorView> =
@@ -372,6 +470,23 @@ pub fn make_editor(frame: NSRect) -> Retained<EditorView> {
     layout.setDelegate(Some(ProtocolObject::from_ref(&*editor)));
     editor.setDelegate(Some(ProtocolObject::from_ref(&*editor)));
     editor.apply_theme();
+    let weak = Weak::new(&*editor);
+    let restyle = RcBlock::new(move |_: NonNull<NSNotification>| {
+        if let Some(e) = weak.load() {
+            guarded(|| e.apply_theme());
+        }
+    });
+    // SAFETY: no queue means the block runs on the posting thread, and the
+    // settings are only changed on the main thread, where the editor lives.
+    let token = unsafe {
+        NSNotificationCenter::defaultCenter().addObserverForName_object_queue_usingBlock(
+            Some(&NSString::from_str(settings::CHANGED)),
+            None,
+            None,
+            &restyle,
+        )
+    };
+    *editor.ivars().observer.borrow_mut() = Some(Observer(token));
     editor
 }
 
@@ -386,4 +501,17 @@ pub fn editor_in_scroll(frame: NSRect) -> (Retained<NSScrollView>, Retained<Edit
     let editor = make_editor(NSRect::new(NSPoint::new(0.0, 0.0), scroll.contentSize()));
     scroll.setDocumentView(Some(&editor));
     (scroll, editor)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::wheel_step;
+
+    #[test]
+    fn wheel_steps_once_per_line() {
+        assert_eq!(wheel_step(0.0, 0.4), (0.4, 0));
+        assert_eq!(wheel_step(0.4, 0.7), (0.0, 1));
+        assert_eq!(wheel_step(0.0, -3.0), (0.0, -1)); // one step per event, not per line
+        assert_eq!(wheel_step(0.5, -0.5), (0.0, 0)); // reversing cancels
+    }
 }

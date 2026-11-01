@@ -1,6 +1,5 @@
 use objc2::rc::Retained;
-use objc2_app_kit::{NSColor, NSFont, NSFontWeightRegular};
-use objc2_foundation::ns_string;
+use objc2_app_kit::{NSColor, NSFont};
 
 /// The editor colours for one appearance.
 pub struct Palette {
@@ -29,8 +28,7 @@ pub fn palette(dark: bool) -> Palette {
     Palette { bg, text, accent, marker, code_bg, selection, search, current }
 }
 
-/// The editor font. Task 11 replaces this with the font and zoom settings.
+/// The editor font, from the font and zoom settings.
 pub fn base_font() -> Retained<NSFont> {
-    NSFont::fontWithName_size(ns_string!("IBM Plex Mono"), 13.0)
-        .unwrap_or_else(|| NSFont::monospacedSystemFontOfSize_weight(13.0, unsafe { NSFontWeightRegular }))
+    crate::settings::current_font()
 }

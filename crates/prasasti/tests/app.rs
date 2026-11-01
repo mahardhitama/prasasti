@@ -4,19 +4,22 @@ mod ui;
 
 use std::time::Instant;
 
+use objc2::AnyThread;
 use objc2::rc::{Retained, autoreleasepool};
 use objc2::runtime::{AnyObject, NSObjectProtocol};
 use objc2_app_kit::{
-    NSApplication, NSBackgroundColorAttributeName, NSButton, NSDocument, NSSearchField, NSSearchFieldCell, NSEventModifierFlags, NSFont, NSFontManager, NSFontTraitMask,
+    NSApplication, NSBackgroundColorAttributeName, NSFontPanel, NSButton, NSDocument, NSSearchField, NSSearchFieldCell, NSEventModifierFlags, NSFont, NSFontManager, NSFontTraitMask,
     NSGlyphProperty, NSPasteboard, NSPasteboardTypeString, NSTextInputClient, NSTextStorage,
 };
 use objc2_foundation::{
-    MainThreadMarker, NSData, NSError, NSNotFound, NSPoint, NSRange, NSRect, NSSize, NSString,
+    MainThreadMarker, NSData, NSUserDefaults, NSError, NSNotFound, NSPoint, NSRange, NSRect, NSSize, NSString,
     ns_string,
 };
 use prasasti::document::{HoldReason, PrasastiDocument};
 use prasasti::editor::{EditorView, make_editor};
 use prasasti::find_bar::FindBar;
+use prasasti::footer::Footer;
+use prasasti::settings;
 use prasasti::styler::{Styler, hidden_key};
 use prasasti::theme::{base_font, palette};
 
@@ -486,7 +489,8 @@ fn escape_closes_bar() {
     assert!(bar.isHidden());
     let content = win.contentView().expect("content");
     content.layoutSubtreeIfNeeded();
-    assert_eq!(e.enclosingScrollView().expect("scroll").frame(), content.bounds(), "editor takes the bar's room");
+    let scroll = e.enclosingScrollView().expect("scroll").frame();
+    assert_eq!(scroll.origin.y + scroll.size.height, content.bounds().size.height, "editor takes the bar's room");
     assert!(match_bg(&e, 0).is_none() && match_bg(&e, 2).is_none());
     assert!(is_first_responder(&win, &e));
     assert_eq!(e.string().to_string(), "a a");
@@ -556,8 +560,155 @@ fn click_moves_current_highlight() {
     win.close();
 }
 
+/// Points the settings at the test suite, emptied.
+fn fresh_defaults() {
+    let d = test_defaults();
+    for k in ["editorFont", "textZoom"] {
+        d.removeObjectForKey(&NSString::from_str(k));
+    }
+}
+
+fn test_defaults() -> Retained<NSUserDefaults> {
+    NSUserDefaults::initWithSuiteName(NSUserDefaults::alloc(), Some(ns_string!("prasasti-tests"))).expect("suite")
+}
+
+fn footer(e: &EditorView) -> Retained<Footer> {
+    e.footer().expect("footer registered")
+}
+
+fn point_size(e: &EditorView) -> f64 {
+    e.font().expect("font").pointSize()
+}
+
+fn missing_font_falls_back() {
+    let f = settings::editor_font("No Such Font 123", 1.0);
+    let family = f.familyName().map(|s| s.to_string()).unwrap_or_default();
+    assert!(family == "IBM Plex Mono" || f.isFixedPitch(), "{family}");
+    assert_eq!(f.pointSize(), 13.0);
+}
+
+fn zoom_in_changes_point_size() {
+    fresh_defaults();
+    let (win, e) = ui::window_with("# hi **b**");
+    assert_eq!(point_size(&e), 13.0);
+    ui::shortcut(&win, "=", CMD);
+    assert!((point_size(&e) - 13.0 * 1.1).abs() < 1e-9);
+    assert_eq!(settings::zoom(), 1.1);
+    // The storage is restyled too, not only the typing font.
+    let f = attr(e.storage(), unsafe { objc2_app_kit::NSFontAttributeName }, 0).expect("font attr");
+    assert!((f.downcast::<NSFont>().unwrap().pointSize() - 13.0 * 1.1).abs() < 1e-9);
+    ui::shortcut(&win, "+", CMD);
+    assert_eq!(settings::zoom(), 1.25);
+    ui::shortcut(&win, "-", CMD);
+    assert_eq!(settings::zoom(), 1.1);
+    ui::shortcut(&win, "0", CMD);
+    assert_eq!(point_size(&e), 13.0);
+    assert_eq!(footer(&e).status(), "Text size 100%");
+    // Zoom is a view setting: no undo step, text untouched.
+    assert!(!e.undoManager().is_some_and(|u| u.canUndo()));
+    assert_eq!(e.string().to_string(), "# hi **b**");
+    win.close();
+}
+
+fn zoom_status_at_limit() {
+    fresh_defaults();
+    settings::set_zoom(3.0);
+    let (win, e) = ui::window_with("x");
+    assert_eq!(point_size(&e), 39.0);
+    ui::shortcut(&win, "=", CMD);
+    assert_eq!(settings::zoom(), 3.0);
+    assert_eq!(footer(&e).status(), "Text size 300%");
+    win.close();
+}
+
+fn status_clears_after_3s() {
+    let (win, e) = ui::window_with("x");
+    footer(&e).set_status("hello");
+    ui::pump(2.5);
+    assert_eq!(footer(&e).status(), "hello");
+    footer(&e).set_status("again"); // a new status restarts the clock
+    ui::pump(2.0);
+    assert_eq!(footer(&e).status(), "again");
+    ui::pump(1.2);
+    assert_eq!(footer(&e).status(), "");
+    win.close();
+}
+
+fn zoom_applies_to_every_window() {
+    fresh_defaults();
+    let (w1, e1) = ui::window_with("a");
+    let (w2, e2) = ui::window_with("b");
+    {
+        // A window that is gone must not be notified.
+        let (w3, _e3) = ui::window_with("c");
+        w3.close();
+    }
+    ui::shortcut(&w1, "-", CMD);
+    assert!((point_size(&e2) - 13.0 * 0.9).abs() < 1e-9);
+    assert_eq!(footer(&e1).status(), "Text size 90%");
+    assert_eq!(footer(&e2).status(), "");
+    w1.close();
+    w2.close();
+}
+
+fn counts_words_after_debounce() {
+    let (win, e) = ui::window_with("");
+    ui::type_text(&win, "one two");
+    ui::pump(0.1);
+    assert_eq!(footer(&e).words(), 0, "debounced");
+    ui::pump(0.4);
+    assert_eq!(footer(&e).words(), 2);
+    assert_eq!(footer(&e).words_label(), "2 Words");
+    ui::key(&win, ui::BACKSPACE, NSEventModifierFlags::empty());
+    ui::key(&win, ui::BACKSPACE, NSEventModifierFlags::empty());
+    ui::key(&win, ui::BACKSPACE, NSEventModifierFlags::empty());
+    ui::pump(0.4);
+    assert_eq!(footer(&e).words_label(), "1 Word");
+    win.close();
+}
+
+fn change_font_stores_family() {
+    fresh_defaults();
+    let (win, e) = ui::window_with("x");
+    settings::set_zoom(1.5);
+    let mtm = mtm();
+    let fm = NSFontManager::sharedFontManager(mtm);
+    let menlo = NSFont::fontWithName_size(ns_string!("Menlo"), 30.0).expect("Menlo ships with macOS");
+    // The panel is out of process for events; set its choice and send its action.
+    let panel = NSFontPanel::sharedFontPanel(mtm);
+    panel.setPanelFont_isMultiple(&menlo, false);
+    // What a pick in the panel does: the manager sends changeFont: (aimed at
+    // the editor; the test app has no key window) and converts via the panel.
+    unsafe {
+        fm.setTarget(Some(&e));
+        fm.modifyFontViaPanel(Some(&panel));
+        fm.setTarget(None);
+    }
+    assert_eq!(settings::font_family(), "Menlo");
+    assert_eq!(e.font().unwrap().familyName().unwrap().to_string(), "Menlo");
+    assert_eq!(point_size(&e), 13.0 * 1.5, "size comes from the zoom");
+    panel.close();
+    win.close();
+}
+
+fn font_button_opens_panel() {
+    let (win, e) = ui::window_with("x");
+    let b = footer(&e).subviews().iter().find_map(|v| v.downcast::<NSButton>().ok()).expect("font button");
+    click(&b);
+    let panel = NSFontPanel::sharedFontPanel(mtm());
+    assert!(panel.isVisible());
+    panel.close();
+    ui::shortcut(&win, "t", CMD);
+    assert!(panel.isVisible(), "⌘T shows it too");
+    panel.close();
+    win.close();
+}
+
 fn main() {
     let _app = NSApplication::sharedApplication(mtm());
+    // Never the user's real defaults domain.
+    settings::set_defaults(Some(test_defaults()));
+    fresh_defaults();
     let tests: &[(&str, fn())] = &[
         ("opens_utf8", opens_utf8),
         ("refuses_non_utf8", refuses_non_utf8),
@@ -592,6 +743,14 @@ fn main() {
         ("click_moves_current_highlight", click_moves_current_highlight),
         ("undo_in_field_without_replace_stays_in_field", undo_in_field_without_replace_stays_in_field),
         ("replace_all_keeps_far_markers_hidden", replace_all_keeps_far_markers_hidden),
+        ("missing_font_falls_back", missing_font_falls_back),
+        ("zoom_in_changes_point_size", zoom_in_changes_point_size),
+        ("zoom_status_at_limit", zoom_status_at_limit),
+        ("status_clears_after_3s", status_clears_after_3s),
+        ("zoom_applies_to_every_window", zoom_applies_to_every_window),
+        ("counts_words_after_debounce", counts_words_after_debounce),
+        ("change_font_stores_family", change_font_stores_family),
+        ("font_button_opens_panel", font_button_opens_panel),
     ];
     let mut failed = 0;
     for (name, f) in tests {
