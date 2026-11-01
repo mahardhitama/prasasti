@@ -1,4 +1,5 @@
 pub mod file;
+pub mod markdown;
 pub mod words;
 pub mod zoom;
 
