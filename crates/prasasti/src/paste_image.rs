@@ -3,8 +3,18 @@
 
 use std::collections::HashMap;
 use std::fs::{self, File, OpenOptions};
-use std::io;
+use std::io::{self, Write};
 use std::path::{Component, Path, PathBuf};
+use std::time::Duration;
+
+use objc2::ClassType;
+use objc2::runtime::AnyObject;
+use objc2_app_kit::{
+    NSBitmapImageFileType, NSBitmapImageRep, NSPasteboard, NSPasteboardURLReadingContentsConformToTypesKey,
+    NSPasteboardURLReadingFileURLsOnlyKey,
+};
+use objc2_foundation::{NSArray, NSDate, NSDateFormatter, NSDictionary, NSHomeDirectory, NSLocale, NSNumber, NSString, NSURL, ns_string};
+use prasasti_core::images;
 
 /// `<dir>/<stem>.assets` for a document at `doc_path`.
 pub fn assets_dir(doc_path: &Path) -> PathBuf {
@@ -59,6 +69,83 @@ pub fn carry(paths: &[Vec<u16>], sources: &[PathBuf], dest_dir: &Path) -> (HashM
         }
     }
     (map, errors)
+}
+
+thread_local! {
+    /// Tests only: replaces `pasted_root()`.
+    pub static PASTED_ROOT: std::cell::RefCell<Option<PathBuf>> = const { std::cell::RefCell::new(None) };
+}
+
+/// Where untitled documents' pasted images go, one `<uuid>` folder each.
+pub fn pasted_root() -> PathBuf {
+    PASTED_ROOT.with(|r| r.borrow().clone()).unwrap_or_else(|| {
+        PathBuf::from(NSHomeDirectory().to_string()).join("Library/Application Support/Prasasti/Pasted")
+    })
+}
+
+/// Deletes the folders in `root` not modified for `max_age`.
+/// shortcut: by age only, a draft older than that loses its images; reference-check drafts if reported.
+pub fn prune(root: &Path, max_age: Duration) {
+    let Ok(entries) = fs::read_dir(root) else { return };
+    for e in entries.flatten() {
+        let old = e.metadata().ok().filter(|m| m.is_dir()).and_then(|m| m.modified().ok()).and_then(|t| t.elapsed().ok()).is_some_and(|age| age > max_age);
+        if old {
+            let _ = fs::remove_dir_all(e.path());
+        }
+    }
+}
+
+/// Markdown for the images on `pb`: image file URLs as links where
+/// they are, else image data written to a new file. `Ok(None)`: no image.
+/// `paste_dir` gives the untitled document's folder.
+pub fn markdown_for_pasteboard(pb: &NSPasteboard, doc: Option<&Path>, paste_dir: &dyn Fn() -> PathBuf) -> Result<Option<String>, String> {
+    let link = |alt: &str, path: &Path| {
+        let abs: Vec<u16> = path.to_string_lossy().encode_utf16().collect();
+        let dest = match doc.and_then(Path::parent) {
+            Some(dir) => images::relative_path(&dir.to_string_lossy().encode_utf16().collect::<Vec<u16>>(), &abs),
+            None => abs,
+        };
+        format!("![{alt}]({})", String::from_utf16_lossy(&images::format_destination(&dest, false)))
+    };
+    // SAFETY: AppKit's own constant keys.
+    let keys = unsafe { [NSPasteboardURLReadingFileURLsOnlyKey, NSPasteboardURLReadingContentsConformToTypesKey] };
+    let only_images = NSDictionary::from_slices(
+        &keys,
+        &[&*NSNumber::new_bool(true) as &AnyObject, &*NSArray::from_retained_slice(&[NSString::from_str("public.image")])],
+    );
+    // SAFETY: NSURL is a pasteboard-reading class; the options take these value types.
+    let urls = unsafe { pb.readObjectsForClasses_options(&NSArray::from_slice(&[NSURL::class()]), Some(&only_images)) };
+    let paths: Vec<PathBuf> = urls.iter().flat_map(|a| a.iter()).filter_map(|u| u.downcast::<NSURL>().ok()?.path()).map(|p| PathBuf::from(p.to_string())).collect();
+    if !paths.is_empty() {
+        return Ok(Some(paths.iter().map(|p| link(&p.file_stem().unwrap_or_default().to_string_lossy(), p)).collect::<Vec<_>>().join("\n")));
+    }
+    let types = ["public.png", "public.jpeg", "public.gif", "public.tiff", "public.heic"].map(NSString::from_str);
+    let Some(kind) = pb.availableTypeFromArray(&NSArray::from_retained_slice(&types)) else { return Ok(None) };
+    let Some(data) = pb.dataForType(&kind) else { return Ok(None) };
+    let fail = |e: &dyn std::fmt::Display| format!("Couldn't save pasted image: {e}");
+    let (bytes, ext) = match kind.to_string().as_str() {
+        "public.png" => (data.to_vec(), "png"),
+        "public.jpeg" => (data.to_vec(), "jpg"),
+        "public.gif" => (data.to_vec(), "gif"),
+        _ => {
+            let png = NSBitmapImageRep::imageRepWithData(&data)
+                // SAFETY: an empty properties dictionary.
+                .and_then(|rep| unsafe { rep.representationUsingType_properties(NSBitmapImageFileType::PNG, &NSDictionary::new()) })
+                .ok_or_else(|| fail(&"unreadable image data"))?;
+            (png.to_vec(), "png")
+        }
+    };
+    let f = NSDateFormatter::new();
+    f.setLocale(Some(&NSLocale::localeWithLocaleIdentifier(ns_string!("en_US_POSIX"))));
+    f.setDateFormat(Some(ns_string!("yyyyMMdd-HHmmss")));
+    let name = format!("paste-{}.{ext}", f.stringFromDate(&NSDate::now()));
+    let dir = doc.map_or_else(paste_dir, assets_dir);
+    let (path, mut file) = create_new(&dir, &name).map_err(|e| fail(&e))?;
+    if let Err(e) = file.write_all(&bytes) {
+        let _ = fs::remove_file(&path); // our own partial file
+        return Err(fail(&e));
+    }
+    Ok(Some(link("", &path)))
 }
 
 #[cfg(test)]

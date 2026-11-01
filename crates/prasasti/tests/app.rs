@@ -2259,6 +2259,163 @@ fn save_to_never_rebases() {
     });
 }
 
+// ---- Image paste ----
+
+const PNG_1X1: &[u8] = &[0x89,0x50,0x4e,0x47,0x0d,0x0a,0x1a,0x0a,0x00,0x00,0x00,0x0d,0x49,0x48,0x44,0x52,0x00,0x00,0x00,0x01,0x00,0x00,0x00,0x01,0x08,0x06,0x00,0x00,0x00,0x1f,0x15,0xc4,0x89,0x00,0x00,0x00,0x0d,0x49,0x44,0x41,0x54,0x78,0xda,0x63,0x64,0x60,0xf8,0x5f,0x0f,0x00,0x02,0x87,0x01,0x80,0xeb,0x47,0xba,0x92,0x00,0x00,0x00,0x00,0x49,0x45,0x4e,0x44,0xae,0x42,0x60,0x82];
+
+/// Runs `f` inside `with_clipboard`, the pasteboard holding `items` (UTI, bytes)
+/// as well as the string `s`, with a fresh temp folder as `pasted_root`.
+fn with_paste<T>(s: &str, items: &[(&str, &[u8])], f: impl FnOnce(&std::path::Path) -> T) -> T {
+    let root = std::env::temp_dir().join(format!("prasasti-pasted-{}-{}", std::process::id(), std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_nanos()));
+    prasasti::paste_image::PASTED_ROOT.with(|r| *r.borrow_mut() = Some(root.clone()));
+    let r = with_clipboard(s, || {
+        let pb = NSPasteboard::generalPasteboard();
+        for (t, bytes) in items {
+            assert!(pb.setData_forType(Some(&NSData::with_bytes(bytes)), &NSString::from_str(t)));
+        }
+        std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| f(&root)))
+    });
+    prasasti::paste_image::PASTED_ROOT.with(|r| *r.borrow_mut() = None);
+    let _ = std::fs::remove_dir_all(&root);
+    r.unwrap_or_else(|e| std::panic::resume_unwind(e))
+}
+
+/// Pastes, then lets the run loop close the undo group: NSDocument counts the
+/// change a turn later, which must not land after the fixture deleted the file.
+fn paste(fx: &OnDisk, key: &str, mods: NSEventModifierFlags) {
+    ui::shortcut(&fx.win, key, mods);
+    ui::pump(0.05);
+}
+
+/// The one `paste-…` file in `dir`.
+fn pasted_file(dir: &std::path::Path) -> std::path::PathBuf {
+    let files: Vec<_> = std::fs::read_dir(dir).expect("pasted folder").map(|e| e.unwrap().path()).collect();
+    assert_eq!(files.len(), 1, "{files:?}");
+    assert!(files[0].file_name().unwrap().to_str().unwrap().starts_with("paste-"), "{files:?}");
+    files[0].clone()
+}
+
+fn paste_png_into_saved_doc() {
+    with_paste("", &[("public.png", b"pngbytes")], |_| {
+        on_disk("paste-png", "a\n", |fx| {
+            paste(fx, "v", CMD);
+            let file = pasted_file(&fx.path.parent().unwrap().join("doc.assets"));
+            let name = file.file_name().unwrap().to_str().unwrap();
+            assert!(name.ends_with(".png"), "{name}");
+            assert_eq!(fx.text(), format!("![](doc.assets/{name})a\n"));
+            assert_eq!(std::fs::read(&file).unwrap(), b"pngbytes");
+        });
+    });
+}
+
+fn paste_png_into_untitled_then_save() {
+    with_paste("", &[("public.png", b"pngbytes")], |root| {
+        let dir = root.join("saved");
+        std::fs::create_dir_all(&dir).unwrap();
+        let doc = PrasastiDocument::new(mtm());
+        doc.makeWindowControllers();
+        let r = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            ui::shortcut(&document_window(&doc), "v", CMD);
+            let uuid_dirs: Vec<_> = std::fs::read_dir(root).unwrap().map(|e| e.unwrap().path()).filter(|p| *p != dir).collect();
+            assert_eq!(uuid_dirs.len(), 1, "{uuid_dirs:?}");
+            let file = pasted_file(&uuid_dirs[0]);
+            let name = file.file_name().unwrap().to_str().unwrap().to_string();
+            assert_eq!(doc.text().to_string(), format!("![]({})", file.display()));
+            save_op(&doc, &dir.join("n.md"), objc2_app_kit::NSSaveOperationType::SaveOperation);
+            assert_eq!(doc.text().to_string(), format!("![](n.assets/{name})"));
+            assert_eq!(std::fs::read(dir.join("n.assets").join(&name)).unwrap(), b"pngbytes");
+        }));
+        doc.close();
+        r.unwrap_or_else(|e| std::panic::resume_unwind(e))
+    });
+}
+
+fn paste_finder_file_url() {
+    with_paste("", &[], |_| {
+        on_disk("paste-url", "a\n", |fx| {
+            let dir = fx.path.parent().unwrap();
+            let pic = dir.join("pic.png");
+            std::fs::write(&pic, PNG_1X1).unwrap();
+            let pb = NSPasteboard::generalPasteboard();
+            pb.clearContents();
+            let url = NSURL::fileURLWithPath(&NSString::from_str(pic.to_str().unwrap()));
+            let item = objc2::runtime::ProtocolObject::<dyn objc2_app_kit::NSPasteboardWriting>::from_retained(url);
+            assert!(pb.writeObjects(&objc2_foundation::NSArray::from_retained_slice(&[item])));
+            let before = std::fs::read_dir(dir).unwrap().count();
+            paste(fx, "v", CMD);
+            assert_eq!(fx.text(), "![pic](pic.png)a\n");
+            assert_eq!(std::fs::read_dir(dir).unwrap().count(), before, "nothing copied");
+        });
+    });
+}
+
+fn paste_tiff_converted_to_png() {
+    let tiff = objc2_app_kit::NSBitmapImageRep::imageRepWithData(&NSData::with_bytes(PNG_1X1)).unwrap().TIFFRepresentation().unwrap().to_vec();
+    with_paste("", &[("public.tiff", &tiff)], |_| {
+        on_disk("paste-tiff", "a\n", |fx| {
+            paste(fx, "v", CMD);
+            let file = pasted_file(&fx.path.parent().unwrap().join("doc.assets"));
+            assert!(file.to_str().unwrap().ends_with(".png"), "{file:?}");
+            assert!(std::fs::read(&file).unwrap().starts_with(&PNG_1X1[..8]), "PNG signature");
+        });
+    });
+}
+
+fn undo_paste_keeps_file() {
+    with_paste("", &[("public.png", b"pngbytes")], |_| {
+        on_disk("paste-undo", "a\n", |fx| {
+            fx.type_text("x");
+            ui::pump(0.05);
+            paste(fx, "v", CMD);
+            ui::shortcut(&fx.win, "z", CMD);
+            ui::pump(0.05);
+            assert_eq!(fx.text(), "xa\n", "undo removes the paste alone");
+            assert!(pasted_file(&fx.path.parent().unwrap().join("doc.assets")).exists());
+        });
+    });
+}
+
+fn match_style_paste_ignores_image() {
+    with_paste("words", &[("public.png", b"pngbytes")], |root| {
+        on_disk("paste-match", "a\n", |fx| {
+            paste(fx, "V", OPT_CMD);
+            assert_eq!(fx.text(), "wordsa\n");
+            assert!(!fx.path.parent().unwrap().join("doc.assets").exists());
+            assert!(!root.exists());
+        });
+    });
+}
+
+fn paste_write_failure_inserts_nothing() {
+    with_paste("", &[("public.png", b"pngbytes")], |_| {
+        on_disk("paste-fail", "a\n", |fx| {
+            let assets = fx.path.parent().unwrap().join("doc.assets");
+            std::fs::create_dir_all(&assets).unwrap();
+            set_mode(&assets, 0o500);
+            paste(fx, "v", CMD);
+            set_mode(&assets, 0o755);
+            assert_eq!(fx.text(), "a\n");
+            let status = fx.status();
+            assert!(status.starts_with("Couldn't save pasted image:"), "{status}");
+            assert_eq!(std::fs::read_dir(&assets).unwrap().count(), 0);
+        });
+    });
+}
+
+fn prune_removes_only_old_dirs() {
+    let root = std::env::temp_dir().join(format!("prasasti-prune-{}-{}", std::process::id(), std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_nanos()));
+    let (old, fresh) = (root.join("old"), root.join("fresh"));
+    std::fs::create_dir_all(&old).unwrap();
+    std::fs::create_dir_all(&fresh).unwrap();
+    std::fs::write(old.join("paste.png"), b"x").unwrap();
+    let month = std::time::Duration::from_secs(31 * 86400);
+    std::fs::File::open(&old).unwrap().set_modified(std::time::SystemTime::now() - month).unwrap();
+    prasasti::paste_image::prune(&root, std::time::Duration::from_secs(30 * 86400));
+    let (old_gone, fresh_kept) = (!old.exists(), fresh.exists());
+    let _ = std::fs::remove_dir_all(&root);
+    assert!(old_gone && fresh_kept, "old gone: {old_gone}, fresh kept: {fresh_kept}");
+}
+
 // ---- Modes ----
 
 fn content_of(win: &objc2_app_kit::NSWindow) -> Retained<DocumentView> {
@@ -2779,6 +2936,14 @@ fn main() {
         ("typing_after_rebasing_save_stays_edited", typing_after_rebasing_save_stays_edited),
         ("failed_copy_keeps_original_link", failed_copy_keeps_original_link),
         ("save_to_never_rebases", save_to_never_rebases),
+        ("paste_png_into_saved_doc", paste_png_into_saved_doc),
+        ("paste_png_into_untitled_then_save", paste_png_into_untitled_then_save),
+        ("paste_finder_file_url", paste_finder_file_url),
+        ("paste_tiff_converted_to_png", paste_tiff_converted_to_png),
+        ("undo_paste_keeps_file", undo_paste_keeps_file),
+        ("match_style_paste_ignores_image", match_style_paste_ignores_image),
+        ("paste_write_failure_inserts_nothing", paste_write_failure_inserts_nothing),
+        ("prune_removes_only_old_dirs", prune_removes_only_old_dirs),
     ];
     let mut failed = 0;
     for (name, f) in tests {

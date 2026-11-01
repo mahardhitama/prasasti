@@ -6,7 +6,7 @@ use objc2::runtime::{AnyObject, ProtocolObject};
 use objc2::{AnyThread, DefinedClass, MainThreadOnly, define_class, msg_send};
 use objc2_app_kit::{
     NSAppearanceCustomization, NSAppearanceNameAqua, NSAppearanceNameDarkAqua,
-    NSAutoresizingMaskOptions, NSBackgroundColorAttributeName, NSFontAttributeName, NSStringDrawing, NSEvent, NSEventModifierFlags, NSFont,
+    NSAutoresizingMaskOptions, NSBeep, NSBackgroundColorAttributeName, NSFontAttributeName, NSStringDrawing, NSEvent, NSEventModifierFlags, NSFont,
     NSFontManager,
     NSForegroundColorAttributeName, NSGlyphProperty, NSLayoutManager, NSLayoutManagerDelegate,
     NSPasteboard, NSPasteboardTypeString, NSResponder, NSScrollView, NSText, NSTextContainer,
@@ -23,6 +23,7 @@ use prasasti_core::file::normalize_newlines;
 use prasasti_core::list;
 use prasasti_core::zoom;
 
+use crate::document::PrasastiDocument;
 use crate::find_bar::FindBar;
 use crate::status::StatusPill;
 use crate::settings;
@@ -195,28 +196,33 @@ define_class!(
             }
         }
 
-        /// Plain-string pastes go in with LF line endings; anything else is AppKit's.
+        /// Images become Markdown links; anything else is a plain paste.
         #[unsafe(method(paste:))]
         fn paste(&self, sender: Option<&AnyObject>) {
-            let pb = NSPasteboard::generalPasteboard();
-            let Some(s) = pb.stringForType(unsafe { NSPasteboardTypeString }) else {
-                // SAFETY: NSText's own implementation, same signature.
-                let () = unsafe { msg_send![super(self), paste: sender] };
-                return;
-            };
-            let Some(s) = guarded(|| normalize_newlines(&s.to_string())) else { return };
-            // Its own undo step: insertText would coalesce with the typing around it.
-            self.breakUndoCoalescing();
-            // SAFETY: an NSString is a valid argument; NSNotFound means "the selection".
-            unsafe { self.insertText_replacementRange(&NSString::from_str(&s), NSRange::new(NSNotFound as usize, 0)) };
-            self.breakUndoCoalescing();
+            let Some(result) = guarded(|| self.image_markdown()) else { return };
+            match result {
+                Ok(None) => self.paste_text(sender),
+                Ok(Some(md)) => {
+                    let sel = self.selectedRange();
+                    let at = sel.location + md.encode_utf16().count();
+                    // Its own undo step, apart from the typing around it.
+                    self.breakUndoCoalescing();
+                    self.apply_edit(&Edit { range: sel.location..sel.end(), replacement: md, selection: at..at });
+                    self.breakUndoCoalescing();
+                }
+                Err(msg) => {
+                    NSBeep();
+                    if let Some(status) = self.status() {
+                        status.flash(&msg);
+                    }
+                }
+            }
         }
 
-        /// Paste and Match Style: the editor is plain text already, so it is our paste.
+        /// Paste and Match Style: plain text only, the escape hatch from image paste.
         #[unsafe(method(pasteAsPlainText:))]
         fn paste_as_plain_text(&self, sender: Option<&AnyObject>) {
-            // SAFETY: our own `paste:` above, same signature.
-            let () = unsafe { msg_send![self, paste: sender] };
+            self.paste_text(sender);
         }
 
         #[unsafe(method(copyAsHTML:))]
@@ -396,6 +402,30 @@ impl EditorView {
                 status.flash(&format!("Text size {}%", (z * 100.0).round()));
             }
         });
+    }
+
+    /// Markdown for images on the general pasteboard, for this editor's document.
+    fn image_markdown(&self) -> Result<Option<String>, String> {
+        // SAFETY: a plain getter.
+        let doc = self.window().and_then(|w| w.windowController()).and_then(|c| unsafe { c.document() });
+        let Some(doc) = doc.and_then(|d| d.downcast::<PrasastiDocument>().ok()) else { return Ok(None) };
+        crate::paste_image::markdown_for_pasteboard(&NSPasteboard::generalPasteboard(), doc.file_path().as_deref(), &|| doc.paste_dir())
+    }
+
+    /// Plain-string pastes go in with LF line endings; anything else is AppKit's.
+    fn paste_text(&self, sender: Option<&AnyObject>) {
+        let pb = NSPasteboard::generalPasteboard();
+        let Some(s) = pb.stringForType(unsafe { NSPasteboardTypeString }) else {
+            // SAFETY: NSText's own implementation, same signature.
+            let () = unsafe { msg_send![super(self), paste: sender] };
+            return;
+        };
+        let Some(s) = guarded(|| normalize_newlines(&s.to_string())) else { return };
+        // Its own undo step: insertText would coalesce with the typing around it.
+        self.breakUndoCoalescing();
+        // SAFETY: an NSString is a valid argument; NSNotFound means "the selection".
+        unsafe { self.insertText_replacementRange(&NSString::from_str(&s), NSRange::new(NSNotFound as usize, 0)) };
+        self.breakUndoCoalescing();
     }
 
     pub fn palette(&self) -> Ref<'_, Palette> {

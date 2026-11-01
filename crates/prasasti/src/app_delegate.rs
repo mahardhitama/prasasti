@@ -23,6 +23,7 @@ define_class!(
                 #[allow(deprecated)]
                 app.activateIgnoringOtherApps(true);
             }
+            crate::util::guarded(|| crate::paste_image::prune(&crate::paste_image::pasted_root(), std::time::Duration::from_secs(30 * 86400)));
         }
 
         #[unsafe(method(applicationSupportsSecureRestorableState:))]

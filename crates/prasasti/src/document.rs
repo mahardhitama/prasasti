@@ -550,6 +550,17 @@ impl PrasastiDocument {
         guarded(|| normalize_newlines(&text).into_bytes()).unwrap_or(text.into_bytes())
     }
 
+    /// The file's path, None while untitled.
+    pub fn file_path(&self) -> Option<PathBuf> {
+        self.path().map(PathBuf::from)
+    }
+
+    /// This document's folder under `pasted_root`, named on first use.
+    pub fn paste_dir(&self) -> PathBuf {
+        let mut dir = self.ivars().paste_dir.borrow_mut();
+        dir.get_or_insert_with(|| crate::paste_image::pasted_root().join(objc2_foundation::NSUUID::new().UUIDString().to_string())).clone()
+    }
+
     /// Whether a save is in flight (its data produced, its completion not yet run).
     pub fn writing(&self) -> bool {
         self.ivars().pending.borrow().is_some()
