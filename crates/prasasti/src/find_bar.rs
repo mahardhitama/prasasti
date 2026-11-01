@@ -1,4 +1,4 @@
-use std::cell::RefCell;
+use std::cell::{Cell, RefCell};
 
 use objc2::rc::Retained;
 use objc2::runtime::{AnyObject, ProtocolObject, Sel};
@@ -9,7 +9,7 @@ use objc2_app_kit::{
     NSTextField, NSTextFieldDelegate, NSTextView, NSView,
 };
 use objc2_foundation::{
-    MainThreadMarker, NSEdgeInsets, NSNotification, NSObject, NSObjectProtocol, NSRange, NSRect, NSString,
+    MainThreadMarker, NSEdgeInsets, NSNotification, NSObject, NSObjectProtocol, NSUndoManager, NSRange, NSRect, NSString,
 };
 use prasasti_core::edit::Edit;
 use prasasti_core::search::find_matches;
@@ -25,6 +25,8 @@ pub struct Ivars {
     replace_views: Vec<Retained<NSView>>,
     /// Start offsets of the matches; each is as long as the query.
     matches: RefCell<Vec<usize>>,
+    /// A replace happened since the fields were last typed in, so ⌘Z means the document.
+    replaced: Cell<bool>,
 }
 
 define_class!(
@@ -41,6 +43,7 @@ define_class!(
     unsafe impl NSControlTextEditingDelegate for FindBar {
         #[unsafe(method(controlTextDidChange:))]
         fn control_text_did_change(&self, note: &NSNotification) {
+            self.ivars().replaced.set(false);
             let from_search = note.object().is_some_and(|o| std::ptr::eq(&*o, self.ivars().search.as_ref() as &AnyObject));
             if from_search {
                 guarded(|| self.search(self.ivars().editor.selectedRange().location));
@@ -69,7 +72,12 @@ define_class!(
     }
 
     unsafe impl NSTextFieldDelegate for FindBar {}
-    unsafe impl NSSearchFieldDelegate for FindBar {}
+    unsafe impl NSSearchFieldDelegate for FindBar {
+        #[unsafe(method(searchFieldDidEndSearching:))]
+        fn search_field_did_end_searching(&self, _field: &NSSearchField) {
+            guarded(|| self.search(self.ivars().editor.selectedRange().location));
+        }
+    }
 
     /// The menu's find actions while a bar field has focus.
     impl FindBar {
@@ -80,6 +88,21 @@ define_class!(
         #[unsafe(method(showFindReplaceBar:))]
         fn show_find_replace_bar(&self, _sender: Option<&AnyObject>) {
             guarded(|| self.show(true));
+        }
+        /// The search field's action (cancel button, typing pause): search again.
+        #[unsafe(method(searchFieldChanged:))]
+        fn search_field_changed(&self, _sender: Option<&AnyObject>) {
+            guarded(|| self.search(self.ivars().editor.selectedRange().location));
+        }
+        /// The fields' own undo (AppKit's field editor) unless a replace came
+        /// after their typing; then the document's, so Replace undoes from the bar.
+        #[unsafe(method(undo:))]
+        fn undo(&self, _sender: Option<&AnyObject>) {
+            guarded(|| self.undo_manager().filter(|u| u.canUndo()).map(|u| u.undo()));
+        }
+        #[unsafe(method(redo:))]
+        fn redo(&self, _sender: Option<&AnyObject>) {
+            guarded(|| self.undo_manager().filter(|u| u.canRedo()).map(|u| u.redo()));
         }
         #[unsafe(method(findNext:))]
         fn find_next(&self, _sender: Option<&AnyObject>) {
@@ -135,10 +158,16 @@ impl FindBar {
             replace,
             replace_views,
             matches: RefCell::new(vec![]),
+            replaced: Cell::new(false),
         });
         // SAFETY: NSView's designated initializer.
         let this: Retained<Self> = unsafe { msg_send![super(this), initWithFrame: NSRect::ZERO] };
         let ivars = this.ivars();
+        // SAFETY: `searchFieldChanged:` is a `-(void)x:(id)sender` method of the bar, which outlives the field.
+        unsafe {
+            ivars.search.setTarget(Some(&this));
+            ivars.search.setAction(Some(sel!(searchFieldChanged:)));
+        }
         for b in &buttons {
             // SAFETY: the bar outlives its own buttons.
             unsafe { b.setTarget(Some(&this)) };
@@ -200,20 +229,21 @@ impl FindBar {
     pub fn replace_one(&self) {
         let editor = &self.ivars().editor;
         let sel = editor.selectedRange();
-        let len = self.query().len();
-        let selected = len > 0 && sel.length == len && self.ivars().matches.borrow().contains(&sel.location);
+        let Some(len) = self.fresh_query() else { return };
+        let selected = sel.length == len && self.ivars().matches.borrow().contains(&sel.location);
         if !selected {
             return self.select_from(sel.location);
         }
         let replacement = self.ivars().replace.stringValue().to_string();
         let end = sel.location + replacement.encode_utf16().count();
         editor.apply_edit(&Edit { range: sel.location..sel.end(), replacement, selection: end..end });
+        self.ivars().replaced.set(true);
         self.select_from(end);
     }
 
     /// Replaces every match as one edit, so one undo step.
     pub fn replace_all(&self) {
-        let len = self.query().len();
+        let Some(len) = self.fresh_query() else { return };
         let m = self.matches();
         let (Some(&first), Some(&last)) = (m.first(), m.last()) else { return };
         let text = to_u16(&self.ivars().editor.string());
@@ -229,6 +259,25 @@ impl FindBar {
         let Ok(replacement) = String::from_utf16(&out) else { return };
         let end = first + out.len();
         self.ivars().editor.apply_edit(&Edit { range: first..last + len, replacement, selection: end..end });
+        self.ivars().replaced.set(true);
+    }
+
+    /// Matches for what the field holds now (it can change without a
+    /// text-did-change); the query length, or None when it is empty.
+    fn fresh_query(&self) -> Option<usize> {
+        self.recompute();
+        let len = self.query().len();
+        if len == 0 {
+            self.paint();
+        }
+        (len > 0).then_some(len)
+    }
+
+    fn undo_manager(&self) -> Option<Retained<NSUndoManager>> {
+        if self.ivars().replaced.get() {
+            return self.ivars().editor.undoManager();
+        }
+        self.window()?.firstResponder()?.undoManager()
     }
 
     pub fn matches(&self) -> Vec<usize> {
@@ -283,6 +332,7 @@ impl FindBar {
     }
 
     /// Search colour on every match, current colour on the one the editor selects.
+    // shortcut: paints every match and re-folds the whole text per keystroke; cap to visible range if 2 MB docs stutter
     pub fn paint(&self) {
         let editor = &self.ivars().editor;
         // SAFETY: a plain getter; the editor always has a layout manager.

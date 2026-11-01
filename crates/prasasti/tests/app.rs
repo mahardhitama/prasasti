@@ -7,7 +7,7 @@ use std::time::Instant;
 use objc2::rc::{Retained, autoreleasepool};
 use objc2::runtime::{AnyObject, NSObjectProtocol};
 use objc2_app_kit::{
-    NSApplication, NSBackgroundColorAttributeName, NSButton, NSDocument, NSEventModifierFlags, NSFont, NSFontManager, NSFontTraitMask,
+    NSApplication, NSBackgroundColorAttributeName, NSButton, NSDocument, NSSearchField, NSSearchFieldCell, NSEventModifierFlags, NSFont, NSFontManager, NSFontTraitMask,
     NSGlyphProperty, NSPasteboard, NSPasteboardTypeString, NSTextInputClient, NSTextStorage,
 };
 use objc2_foundation::{
@@ -435,8 +435,6 @@ fn replace_all_one_undo() {
     assert_eq!(e.selectedRange(), NSRange::new(5, 0));
     assert!(find_bar(&e).matches().is_empty());
     ui::pump(0.05);
-    // The fields keep their own undo (AppKit's field editor); the document's is the editor's.
-    win.makeFirstResponder(Some(&e));
     ui::shortcut(&win, "z", CMD);
     assert_eq!(e.string().to_string(), "a a a");
     assert_eq!(e.selectedRange(), NSRange::new(0, 5));
@@ -470,9 +468,14 @@ fn replace_one_advances() {
     click(&replace);
     assert_eq!(e.string().to_string(), "b a");
     assert_eq!(e.selectedRange(), NSRange::new(2, 1));
+    ui::pump(0.05); // separate clicks, separate undo groups
     click(&replace);
     assert_eq!(e.string().to_string(), "b b");
     assert_eq!(e.selectedRange(), NSRange::new(3, 0));
+    ui::pump(0.05);
+    ui::shortcut(&win, "z", CMD);
+    assert_eq!(e.string().to_string(), "b a");
+    assert_eq!(e.selectedRange(), NSRange::new(2, 1));
     win.close();
 }
 
@@ -502,6 +505,54 @@ fn replace_all_keeps_far_markers_hidden() {
     assert_eq!(e.string().to_string(), "**c** b c");
     assert_eq!(e.selectedRange(), NSRange::new(9, 0));
     assert!([0, 1, 3, 4].iter().all(|&i| hidden(e.storage(), i)));
+    win.close();
+}
+
+fn clearing_query_leaves_text_alone() {
+    let (win, e) = searching("a a a", "a", true);
+    let bar = find_bar(&e);
+    let field = bar
+        .subviews()
+        .iter()
+        .find_map(|v| v.downcast::<NSSearchField>().ok())
+        .expect("search field");
+    let cell = field.cell().and_then(|c| c.downcast::<NSSearchFieldCell>().ok()).expect("search cell");
+    // The field's cancel (X) button, as a click on it.
+    unsafe { cell.cancelButtonCell().expect("cancel button").performClick(Some(&field)) };
+    assert_eq!(field.stringValue().to_string(), "");
+    assert!(bar.matches().is_empty());
+    click(&button(&bar, "Replace All"));
+    click(&button(&bar, "Replace"));
+    assert_eq!(e.string().to_string(), "a a a");
+    assert_eq!(e.selectedRange(), NSRange::new(0, 1));
+    // A change that sends no text-did-change (set programmatically) is caught too.
+    ui::type_text(&win, "a");
+    field.setStringValue(ns_string!(""));
+    click(&button(&bar, "Replace All"));
+    click(&button(&bar, "Replace"));
+    assert_eq!(e.string().to_string(), "a a a");
+    assert_eq!(e.selectedRange(), NSRange::new(0, 1));
+    win.close();
+}
+
+fn undo_in_field_without_replace_stays_in_field() {
+    let (win, e) = searching("ab", "ab", false);
+    ui::pump(0.05);
+    ui::shortcut(&win, "z", CMD);
+    let field = find_bar(&e).subviews().iter().find_map(|v| v.downcast::<NSSearchField>().ok()).expect("search field");
+    assert_eq!(field.stringValue().to_string(), "");
+    assert_eq!(e.string().to_string(), "ab");
+    assert_eq!(e.selectedRange(), NSRange::new(0, 2));
+    win.close();
+}
+
+fn click_moves_current_highlight() {
+    let (win, e) = searching("a a", "a", false);
+    e.setSelectedRange(NSRange::new(2, 1));
+    let pal = palette(false);
+    assert!(match_bg(&e, 2).is_some_and(|c| pal.current.isEqual(Some(&*c))));
+    assert!(match_bg(&e, 0).is_some_and(|c| pal.search.isEqual(Some(&*c))));
+    assert_eq!(e.string().to_string(), "a a");
     win.close();
 }
 
@@ -537,6 +588,9 @@ fn main() {
         ("matches_follow_edits_without_moving_caret", matches_follow_edits_without_moving_caret),
         ("replace_one_advances", replace_one_advances),
         ("escape_closes_bar", escape_closes_bar),
+        ("clearing_query_leaves_text_alone", clearing_query_leaves_text_alone),
+        ("click_moves_current_highlight", click_moves_current_highlight),
+        ("undo_in_field_without_replace_stays_in_field", undo_in_field_without_replace_stays_in_field),
         ("replace_all_keeps_far_markers_hidden", replace_all_keeps_far_markers_hidden),
     ];
     let mut failed = 0;

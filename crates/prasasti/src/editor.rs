@@ -120,6 +120,10 @@ define_class!(
 
         #[unsafe(method(textViewDidChangeSelection:))]
         fn text_view_did_change_selection(&self, _note: &NSNotification) {
+            // The current-match colour follows the selection (clicks, arrows).
+            if let Some(bar) = self.find_bar().filter(|b| !b.isHidden()) {
+                guarded(|| bar.paint());
+            }
             let new = self.selectedRange().location;
             let old = self.ivars().caret.replace(new);
             if old == new {
