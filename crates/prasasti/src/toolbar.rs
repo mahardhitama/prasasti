@@ -10,7 +10,7 @@ use objc2::rc::Retained;
 use objc2::runtime::{AnyObject, Sel};
 use objc2::{AnyThread, sel};
 use objc2_app_kit::{
-    NSAccessibility, NSAnimatablePropertyContainer, NSAppearanceCustomization, NSAnimationContext, NSAppearanceNameAqua, NSAppearanceNameDarkAqua,
+    NSAccessibility, NSAccessibilityRadioButtonRole, NSAnimatablePropertyContainer, NSAppearanceCustomization, NSAnimationContext, NSAppearanceNameAqua, NSAppearanceNameDarkAqua,
     NSButton, NSColor, NSFont, NSFontAttributeName, NSFontWeightBold, NSFontWeightMedium, NSForegroundColorAttributeName,
     NSGlassEffectContainerView, NSGlassEffectViewStyle, NSView,
 };
@@ -18,6 +18,7 @@ use objc2_foundation::{MainThreadMarker, NSArray, NSAttributedString, NSDictiona
 
 use crate::content::Mode;
 use crate::glass::GlassView;
+use crate::util::guarded;
 
 /// Track padding around the thumb, each label's width, and the thumb's height.
 const PAD: f64 = 4.0;
@@ -63,6 +64,8 @@ impl Toolbar {
             // SAFETY: no target yet (`set_target`); `action` is an action selector.
             let b = unsafe { NSButton::buttonWithTitle_target_action(&NSString::from_str(t), None, Some(action), mtm) };
             b.setBordered(false);
+            // SAFETY: a plain extern static.
+            b.setAccessibilityRole(Some(unsafe { NSAccessibilityRadioButtonRole }));
             b.setFrame(slot(i));
             // Above the container: it raises glass over its own content view's subviews.
             root.addSubview(&b);
@@ -108,11 +111,13 @@ impl Toolbar {
         if self.root.window().is_some_and(|w| w.isVisible()) {
             let thumb = self.thumb.clone();
             NSAnimationContext::runAnimationGroup(&RcBlock::new(move |ctx: NonNull<NSAnimationContext>| {
-                // SAFETY: AppKit passes the current, live context.
-                let ctx = unsafe { ctx.as_ref() };
-                ctx.setDuration(0.35);
-                ctx.setAllowsImplicitAnimation(true);
-                thumb.animator().setFrame(frame);
+                guarded(|| {
+                    // SAFETY: AppKit passes the current, live context.
+                    let ctx = unsafe { ctx.as_ref() };
+                    ctx.setDuration(0.35);
+                    ctx.setAllowsImplicitAnimation(true);
+                    thumb.animator().setFrame(frame);
+                });
             }));
         } else {
             self.thumb.setFrame(frame);

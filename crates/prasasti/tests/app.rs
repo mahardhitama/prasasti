@@ -709,7 +709,7 @@ fn click_moves_current_highlight() {
 /// Points the settings at the test suite, emptied.
 fn fresh_defaults() {
     let d = test_defaults();
-    for k in ["editorFont", "textZoom", "columnWidth"] {
+    for k in ["editorFont", "textZoom", "columnWidth", "appearance"] {
         d.removeObjectForKey(&NSString::from_str(k));
     }
 }
@@ -1848,7 +1848,8 @@ fn hold_shows_status_pill() {
 
 fn window_has_no_visible_titlebar() {
     on_disk("titlebar", "a\n", |fx| {
-        assert!(fx.win.titlebarAppearsTransparent());
+        // Opaque: AppKit blurs the text scrolling under it only then.
+        assert!(!fx.win.titlebarAppearsTransparent());
         assert_eq!(fx.win.titleVisibility(), objc2_app_kit::NSWindowTitleVisibility::Hidden);
         assert!(fx.win.styleMask().contains(objc2_app_kit::NSWindowStyleMask::FullSizeContentView));
         assert!(fx.win.title().to_string().starts_with("doc"), "{}", fx.win.title());
@@ -2164,7 +2165,71 @@ fn toolbar_accessibility() {
         assert_eq!(preview.isAccessibilitySelected(), on);
         assert_eq!(edit.isAccessibilitySelected(), !on);
     }
+    for b in [&preview, &edit] {
+        assert_eq!(b.accessibilityRole().map(|r| r.to_string()), Some(unsafe { objc2_app_kit::NSAccessibilityRadioButtonRole }.to_string()));
+    }
     win.close();
+}
+
+/// The text of the toolbar's centred title item.
+fn toolbar_title(win: &objc2_app_kit::NSWindow) -> String {
+    let tb = win.toolbar().expect("toolbar");
+    let item = tb.items().iter().find(|i| i.itemIdentifier().to_string() == prasasti::titlebar::TITLE_ITEM).expect("title item");
+    item.view().expect("view").downcast::<objc2_app_kit::NSTextField>().expect("label").stringValue().to_string()
+}
+
+fn window_has_toolbar_with_title() {
+    on_disk("title", "a\n", |fx| {
+        let tb = fx.win.toolbar().expect("toolbar");
+        assert!(!tb.allowsUserCustomization());
+        assert!(!tb.autosavesConfiguration());
+        assert_eq!(fx.win.toolbarStyle(), objc2_app_kit::NSWindowToolbarStyle::Unified);
+        assert_eq!(fx.win.title().to_string(), fx.doc.displayName().to_string());
+        assert_eq!(toolbar_title(&fx.win), fx.win.title().to_string());
+        let new = fx.path.with_file_name("moved.md");
+        let url = NSURL::fileURLWithPath(&NSString::from_str(new.to_str().unwrap()));
+        let done = std::rc::Rc::new(std::cell::Cell::new(false));
+        let d = done.clone();
+        let block = block2::RcBlock::new(move |_: *mut NSError| d.set(true));
+        fx.doc.saveToURL_ofType_forSaveOperation_completionHandler(&url, ns_string!(MD), objc2_app_kit::NSSaveOperationType::SaveAsOperation, &block);
+        wait_until(|| done.get());
+        wait_until(|| toolbar_title(&fx.win) == fx.win.title().to_string() && fx.win.title().to_string().starts_with("moved"));
+    });
+}
+
+fn appearance_button_cycles() {
+    use objc2_app_kit::{NSAccessibility, NSAppearanceNameAqua, NSAppearanceNameDarkAqua};
+    let app = NSApplication::sharedApplication(mtm());
+    let pinned = app.appearance();
+    on_disk("appearance", "a\n", |fx| {
+        let b = prasasti::titlebar::appearance_button(&fx.win).expect("appearance button");
+        let name = || app.appearance().map(|a| a.name().to_string());
+        let stored = || test_defaults().stringForKey(ns_string!("appearance")).map(|s| s.to_string());
+        test_defaults().removeObjectForKey(ns_string!("appearance"));
+        settings::set_appearance("system");
+        for (want, ns) in [("light", Some(unsafe { NSAppearanceNameAqua })), ("dark", Some(unsafe { NSAppearanceNameDarkAqua })), ("system", None)] {
+            click(&b);
+            assert_eq!(name(), ns.map(|n| n.to_string()), "{want}");
+            assert_eq!(stored().as_deref(), Some(want));
+            let label = format!("Appearance: {}{}", want[..1].to_uppercase(), &want[1..]);
+            assert_eq!(b.toolTip().map(|s| s.to_string()), Some(label.clone()));
+            assert_eq!(b.accessibilityLabel().map(|s| s.to_string()), Some(label));
+        }
+    });
+    test_defaults().removeObjectForKey(ns_string!("appearance"));
+    app.setAppearance(pinned.as_deref());
+}
+
+fn editor_clears_toolbar() {
+    on_disk("insets", "a\n", |fx| {
+        let v = content_of(&fx.win);
+        v.layoutSubtreeIfNeeded();
+        let safe = v.safeAreaInsets().top;
+        let bar = v.frame().size.height - fx.win.contentLayoutRect().size.height;
+        assert!(safe >= bar && bar > 30.0, "safe {safe} bar {bar}");
+        let scroll = fx.doc.editor().unwrap().enclosingScrollView().expect("scroll");
+        assert!(scroll.contentInsets().top >= bar, "{} < {bar}", scroll.contentInsets().top);
+    });
 }
 
 fn preview_ignores_typing_and_edit_commands() {
@@ -2476,6 +2541,9 @@ fn main() {
         ("toolbar_click_switches_mode", toolbar_click_switches_mode),
         ("toolbar_thumb_tracks_mode", toolbar_thumb_tracks_mode),
         ("toolbar_accessibility", toolbar_accessibility),
+        ("window_has_toolbar_with_title", window_has_toolbar_with_title),
+        ("appearance_button_cycles", appearance_button_cycles),
+        ("editor_clears_toolbar", editor_clears_toolbar),
         ("preview_ignores_typing_and_edit_commands", preview_ignores_typing_and_edit_commands),
         ("cmd_f_in_preview_opens_find_in_edit", cmd_f_in_preview_opens_find_in_edit),
         ("preview_rerenders_after_reload", preview_rerenders_after_reload),

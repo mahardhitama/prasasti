@@ -11,6 +11,7 @@ pub mod settings;
 pub mod status;
 pub mod styler;
 pub mod theme;
+pub mod titlebar;
 pub mod toolbar;
 pub mod util;
 
@@ -28,5 +29,6 @@ pub fn run() {
     let delegate = app_delegate::AppDelegate::new(mtm);
     app.setDelegate(Some(ProtocolObject::from_ref(&*delegate)));
     menu::install(&app, mtm);
+    titlebar::apply_appearance(mtm);
     app.run();
 }

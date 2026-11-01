@@ -23,6 +23,7 @@ use prasasti_core::file::{decode, normalize_newlines, saves_unchanged};
 
 use crate::content::{DocumentView, Mode};
 use crate::editor::EditorView;
+use crate::titlebar::Titlebar;
 use crate::util::{Observer, guarded, observe};
 
 /// Whether external-change and deletion sheets are shown (off in tests).
@@ -59,6 +60,8 @@ pub struct Ivars {
     sheet_gen: Cell<u64>,
     /// Saves the window's frame when it moves, resizes or closes.
     frame_observers: RefCell<Vec<Observer>>,
+    /// The window's toolbar delegate (NSToolbar holds it weakly).
+    titlebar: RefCell<Option<Retained<Titlebar>>>,
     /// Read from a file (or a recovery draft): the window opens in Preview.
     read_from_disk: Cell<bool>,
 }
@@ -75,6 +78,7 @@ impl Ivars {
             sheet: RefCell::new(None),
             sheet_gen: Cell::new(0),
             frame_observers: RefCell::new(Vec::new()),
+            titlebar: RefCell::new(None),
             read_from_disk: Cell::new(false),
         }
     }
@@ -152,9 +156,11 @@ define_class!(
                 )
             };
             unsafe { window.setReleasedWhenClosed(false) };
-            // Chromeless: the traffic lights stay; the title remains for the
-            // Window menu, Mission Control and Accessibility.
-            window.setTitlebarAppearsTransparent(true);
+            // The text scrolls under the titlebar and toolbar, which blur it
+            // (titlebarAppearsTransparent would drop that edge effect). The
+            // native title stays hidden (unified style puts it at the leading
+            // edge); the toolbar centres it, and it remains for the Window
+            // menu, Mission Control and Accessibility.
             window.setTitleVisibility(NSWindowTitleVisibility::Hidden);
             window.setTabbingMode(NSWindowTabbingMode::Disallowed);
 
@@ -199,6 +205,8 @@ define_class!(
             // A restored frame may be narrower than the column.
             content.update_min_width();
             self.addWindowController(&controller);
+            // After the controller, which sets the window's title.
+            *self.ivars().titlebar.borrow_mut() = Some(Titlebar::install(&window));
             // After the controller: Preview resolves image paths against this document's folder.
             content.set_mode(if self.ivars().read_from_disk.get() { Mode::Preview } else { Mode::Edit });
             *self.ivars().editor.borrow_mut() = Some(editor);

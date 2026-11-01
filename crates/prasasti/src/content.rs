@@ -320,6 +320,8 @@ impl DocumentView {
         ]));
         // SAFETY: a plain setter; zoom is 0.5...3.0.
         unsafe { web.setPageZoom(settings::zoom()) };
+        // SAFETY: a plain setter.
+        unsafe { web.setObscuredContentInsets(NSEdgeInsets { top: self.safeAreaInsets().top, left: 0.0, bottom: 0.0, right: 0.0 }) };
         web
     }
 
@@ -392,6 +394,14 @@ impl DocumentView {
         let cur = iv.scroll.contentInsets();
         if (cur.top, cur.bottom) != (insets.top, insets.bottom) {
             iv.scroll.setContentInsets(insets);
+        }
+        if let Some(web) = iv.web.get() {
+            // The page's first lines clear the titlebar and toolbar.
+            let top = self.safeAreaInsets().top;
+            // SAFETY: plain getter and setter.
+            if unsafe { web.obscuredContentInsets() }.top != top {
+                unsafe { web.setObscuredContentInsets(NSEdgeInsets { top, left: 0.0, bottom: 0.0, right: 0.0 }) };
+            }
         }
     }
 

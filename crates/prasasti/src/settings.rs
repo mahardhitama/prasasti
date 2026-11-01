@@ -1,4 +1,4 @@
-//! The remembered editor font family and text zoom.
+//! The remembered editor font family, text zoom, column width and appearance.
 
 use std::cell::RefCell;
 
@@ -12,6 +12,7 @@ pub const CHANGED: &str = "PrasastiSettingsChanged";
 const FONT_KEY: &str = "editorFont";
 const ZOOM_KEY: &str = "textZoom";
 const COLUMNS_KEY: &str = "columnWidth";
+const APPEARANCE_KEY: &str = "appearance";
 pub const DEFAULT_FAMILY: &str = "JetBrains Mono";
 pub const BASE_SIZE: f64 = 15.0;
 
@@ -61,6 +62,21 @@ pub fn column_width() -> usize {
 
 pub fn set_column_width(n: isize) {
     defaults().setInteger_forKey(clamp_columns(n) as isize, &NSString::from_str(COLUMNS_KEY));
+    notify();
+}
+
+/// "system", "light" or "dark" ("system" when unset or unknown).
+pub fn appearance() -> &'static str {
+    match defaults().stringForKey(&NSString::from_str(APPEARANCE_KEY)).map(|s| s.to_string()).as_deref() {
+        Some("light") => "light",
+        Some("dark") => "dark",
+        _ => "system",
+    }
+}
+
+pub fn set_appearance(mode: &str) {
+    // SAFETY: a string is a property-list value.
+    unsafe { defaults().setObject_forKey(Some(&NSString::from_str(mode)), &NSString::from_str(APPEARANCE_KEY)) };
     notify();
 }
 
