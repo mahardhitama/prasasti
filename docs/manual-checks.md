@@ -1,5 +1,111 @@
 # Manual checks
 
+Last run: 2026-11-01, `bin/bundle` build, "Close
+windows when quitting an application" on (the default). Driven through System
+Events/JXA from the terminal, with screenshots via `screencapture -l<window id>`.
+The system prefers tabs, so several documents shared one window as tabs.
+
+Marks: ✅ pass, ❌ fail, **needs user** = a person has to check it.
+
+## Crash recovery
+
+- ✅ **kill -9 restores untitled and saved documents.** Typed into an Untitled
+  window and an edited saved `saved.md`. Waited until the autosave landed (about
+  15 s), ran `kill -9 <pid>`, relaunched with no arguments. Both came back: Untitled
+  read `untitled text`, and `saved.md` read `# Saved\nedited saved`, which was
+  also on disk.
+- ✅ **⌘Q on an edited untitled window.** A sheet asks "Do you want to keep this
+  new document “Untitled”?" with Delete / Cancel / Save. Cancel keeps the window
+  and its text. Delete quits and removes the draft. Nothing is lost silently, so
+  the `applicationShouldTerminate:` fix (brief Step 2.3) was not needed. After a
+  normal quit, no windows are restored on the next launch.
+- ❌ **kill -9 while held (CRLF).** Opened a CRLF file; the footer read
+  `Auto-save paused: line endings`. Typed in three rounds 25 s apart, and no
+  recovery draft ever appeared in `~/Library/Autosave Information`. After
+  `kill -9` and a relaunch, the hold and the edited mark came back, but the text
+  had reverted to the file's (`round1 round2 round3` lost). The CRLF file stayed
+  byte-identical. Cause: the draft write (`AutosaveElsewhereOperation` to
+  `<name> (Autosaved <id>).md`) fails in the bundled app with NSCocoaErrorDomain
+  512, "couldn't be saved in the folder Autosave Information". The same thing
+  happens for an external-change hold. The app tests pass because their
+  documents never go through `NSDocumentController`.
+- ✅ **⌘Q while held.** After the untitled prompt, the held document shows the
+  alert "Auto-save is paused because saving would change the file's line
+  endings. Choose File > Save to keep your changes." with an OK button. The quit
+  is cancelled and the text stays in the window. Because of the bug above, no
+  draft is written, so a forced quit at that point would lose the text.
+
+## Checklist
+
+- ✅ **Print preview renders headings, bold and code.** Used ⌘P, then PDF > Save as
+  PDF. The heading is large and bold, `bold` is bold, and code and the fence are
+  monospaced. Two oddities: with the default IBM Plex Mono, the printed body is
+  in Times (the HTML importer can't find the bundled Plex), and the text sits
+  vertically centred on the page.
+- ✅ **⌘T opens the Fonts panel, and picking a font changes every window.**
+  Choosing Andale Mono changed both open tabs (read with the AX `AXFont`
+  attribute) and wrote `editorFont`.
+- ✅ **The font survives a relaunch.** After ⌘Q and a relaunch, the editor was
+  still Andale Mono.
+- **needs user**: **switching appearance while a window is open restyles it.**
+  See below.
+- ✅ **Open With opens a `.md` file.** `open -a target/Prasasti.app file.md`
+  worked both at launch and with the app already running.
+- **needs user**: **⌘-scroll zooms.** See below.
+- ✅ **⌃⌘F toggles full screen.** `AXFullScreen` turned on, then off again.
+- ✅ **The window frame is remembered.** Moved and resized to 400,300 800×600,
+  quit and relaunched; the frame was the same.
+- ✅ **⌘N / ⌘O / ⌘S / ⇧⌘S.** ⌘N opens Untitled. ⌘O shows the Open panel and opens
+  the chosen file. ⌘S writes to disk at once. ⇧⌘S is **Duplicate** (Save As… is
+  ⌥⇧⌘S, as with autosave-in-place); ⌘S on the copy shows the save sheet and wrote
+  `dup.md`.
+- ✅ **An external edit triggers the sheet.** With local edits, overwriting the
+  file shows "The file changed on disk." with Keep Mine / Reload. `bin/smoke`
+  also covers Reload.
+
+## From reviews
+
+- ✅ **⌘⇧= zooms (real key).** The physical key (key code 24 with ⇧⌘) went
+  13 → 14.3 pt; ⌘- went 13 → 11.7, and ⌘0 reset it. System Events `keystroke "="`
+  with ⇧⌘ does nothing, because it sends a different character; real keyboards
+  send the key code.
+- ✅ **Footer in Dark mode.** Launched with `--args -AppleInterfaceStyle Dark`.
+  The footer reads `3 Words  Auto-save paused: line endings` with the Font
+  button, in light text on a dark bar, and is readable.
+- **needs user**: **monospaced fallback when Plex is missing.** It can't be
+  forced without uninstalling the font.
+- **needs user**: **typing feel with the find bar open on a 2 MB document.**
+  Automated part: on a 1.97 MB document (340,000 words), the find bar opened
+  and highlighted every `words` match.
+- ✅ **Move to Trash while open triggers the Deleted sheet.** "The file was
+  deleted or moved to the Trash." with Close / Save.
+- **needs user**: **IME marked text while an autosave fires.** See below.
+
+## Needs the user
+
+1. **⌘-scroll zoom.** System Events can't synthesise scroll. Open a document,
+   hold ⌘ and scroll up on a mouse or trackpad: the text grows step by step.
+   Scroll down: it shrinks. A slow trackpad scroll changes at most one step per
+   notch.
+2. **Live appearance switch.** Open a document with some Markdown (a heading,
+   `code`, a link), then switch System Settings > Appearance between Light and
+   Dark. The background, text, markers, code panel and footer restyle at once
+   (light bg `#ffffff`, dark bg `#101010`). Switch back afterwards.
+3. **Plex fallback.** On a Mac without IBM Plex Mono available (for example a
+   build without `resources/fonts`), open a document: the editor uses a
+   monospaced system font (Menlo or SF Mono), not a proportional one.
+4. **Typing feel, 2 MB with the find bar.** Generate the file with
+   `python3 -c "p='## S {}\n\nSome **bold** \`code\` [l](x) words words words.\n\n'; open('/tmp/big.md','w').write(''.join(p.format(i) for i in range(30000))[:2000000])"`,
+   then `open -a target/Prasasti.app /tmp/big.md`. Press ⌘F, type `words`, click
+   in the text and type fast for 10 s, in the middle and at the end. Keystrokes
+   should feel instant, with no visible lag or stutter.
+5. **IME during autosave.** Turn on a Japanese (Kana or Romaji) or Pinyin input
+   source. Open a saved file, type a character and wait about 12 s, then start
+   composing (marked, underlined text) and keep composing past the 15 s autosave.
+   The composition must not be committed, broken or duplicated. After
+   committing, the file on disk holds the committed text after the next
+   autosave.
+
 ## Automated smoke
 
 `bin/smoke` builds `target/Prasasti.app` with `bin/bundle` and drives it through
