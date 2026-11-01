@@ -452,7 +452,9 @@ impl PrasastiDocument {
             keys.borrow_mut().push(p.to_vec());
             None
         });
-        let sources: Vec<PathBuf> = self.ivars().paste_dir.borrow().iter().cloned().chain(old.as_deref().map(crate::paste_image::assets_dir)).collect();
+        // The whole pasted root, not only this document's folder: a document
+        // restored from a draft links into a folder from before the relaunch.
+        let sources: Vec<PathBuf> = std::iter::once(crate::paste_image::pasted_root()).chain(old.as_deref().map(crate::paste_image::assets_dir)).collect();
         // A failed copy is not in the map: that link keeps pointing at the original.
         let (map, errors) = crate::paste_image::carry(&keys.borrow(), &sources, &crate::paste_image::assets_dir(&target));
         if !errors.is_empty()

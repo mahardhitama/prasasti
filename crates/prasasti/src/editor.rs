@@ -199,8 +199,8 @@ define_class!(
         /// Images become Markdown links; anything else is a plain paste.
         #[unsafe(method(paste:))]
         fn paste(&self, sender: Option<&AnyObject>) {
-            let Some(result) = guarded(|| self.image_markdown()) else { return };
-            match result {
+            // A panic there must not lose the paste: fall back to plain text.
+            match guarded(|| self.image_markdown()).unwrap_or(Ok(None)) {
                 Ok(None) => self.paste_text(sender),
                 Ok(Some(md)) => {
                     let sel = self.selectedRange();

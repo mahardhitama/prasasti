@@ -2316,6 +2316,7 @@ fn paste_png_into_untitled_then_save() {
         doc.makeWindowControllers();
         let r = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
             ui::shortcut(&document_window(&doc), "v", CMD);
+            ui::pump(0.05);
             let uuid_dirs: Vec<_> = std::fs::read_dir(root).unwrap().map(|e| e.unwrap().path()).filter(|p| *p != dir).collect();
             assert_eq!(uuid_dirs.len(), 1, "{uuid_dirs:?}");
             let file = pasted_file(&uuid_dirs[0]);
@@ -2398,6 +2399,62 @@ fn paste_write_failure_inserts_nothing() {
             let status = fx.status();
             assert!(status.starts_with("Couldn't save pasted image:"), "{status}");
             assert_eq!(std::fs::read_dir(&assets).unwrap().count(), 0);
+        });
+    });
+}
+
+/// A document restored from a draft has a new paste folder, but its links
+/// still point into the old one: the first save carries those images too.
+fn restored_untitled_paste_carried() {
+    with_paste("", &[], |root| {
+        let old = root.join("11111111-OLD");
+        std::fs::create_dir_all(&old).unwrap();
+        std::fs::write(old.join("paste-1.png"), b"pngbytes").unwrap();
+        let dir = root.join("saved");
+        std::fs::create_dir_all(&dir).unwrap();
+        let doc = PrasastiDocument::new(mtm());
+        doc.makeWindowControllers();
+        let r = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            doc.editor().unwrap().setString(&NSString::from_str(&format!("![]({}/paste-1.png)", old.display())));
+            save_op(&doc, &dir.join("n.md"), objc2_app_kit::NSSaveOperationType::SaveOperation);
+            assert_eq!(doc.text().to_string(), "![](n.assets/paste-1.png)");
+            assert_eq!(std::fs::read(dir.join("n.assets/paste-1.png")).unwrap(), b"pngbytes");
+        }));
+        doc.close();
+        r.unwrap_or_else(|e| std::panic::resume_unwind(e))
+    });
+}
+
+/// A copied non-image file comes with its icon as TIFF: that is not pasted as an image.
+fn paste_non_image_file_url_skips_icon() {
+    let tiff = objc2_app_kit::NSBitmapImageRep::imageRepWithData(&NSData::with_bytes(PNG_1X1)).unwrap().TIFFRepresentation().unwrap();
+    with_paste("", &[], |root| {
+        on_disk("paste-pdf", "a\n", |fx| {
+            let pdf = fx.path.parent().unwrap().join("doc.pdf");
+            std::fs::write(&pdf, b"%PDF-1.4").unwrap();
+            let url = NSURL::fileURLWithPath(&NSString::from_str(pdf.to_str().unwrap()));
+            let item = objc2_app_kit::NSPasteboardItem::new();
+            assert!(item.setString_forType(&url.absoluteString().unwrap(), ns_string!("public.file-url")));
+            assert!(item.setData_forType(&tiff, ns_string!("public.tiff")));
+            let pb = NSPasteboard::generalPasteboard();
+            pb.clearContents();
+            let item = objc2::runtime::ProtocolObject::<dyn objc2_app_kit::NSPasteboardWriting>::from_retained(item);
+            assert!(pb.writeObjects(&objc2_foundation::NSArray::from_retained_slice(&[item])));
+            paste(fx, "v", CMD);
+            assert!(!fx.text().contains("!["), "{}", fx.text());
+            assert!(!fx.path.parent().unwrap().join("doc.assets").exists());
+            assert!(!root.exists());
+        });
+    });
+}
+
+/// Office apps put a rendering beside copied text: ⌘V pastes the text.
+fn paste_prefers_text_over_image_rendering() {
+    with_paste("words", &[("public.png", b"pngbytes")], |_| {
+        on_disk("paste-text-png", "a\n", |fx| {
+            paste(fx, "v", CMD);
+            assert_eq!(fx.text(), "wordsa\n");
+            assert!(!fx.path.parent().unwrap().join("doc.assets").exists());
         });
     });
 }
@@ -2944,6 +3001,9 @@ fn main() {
         ("match_style_paste_ignores_image", match_style_paste_ignores_image),
         ("paste_write_failure_inserts_nothing", paste_write_failure_inserts_nothing),
         ("prune_removes_only_old_dirs", prune_removes_only_old_dirs),
+        ("restored_untitled_paste_carried", restored_untitled_paste_carried),
+        ("paste_non_image_file_url_skips_icon", paste_non_image_file_url_skips_icon),
+        ("paste_prefers_text_over_image_rendering", paste_prefers_text_over_image_rendering),
     ];
     let mut failed = 0;
     for (name, f) in tests {

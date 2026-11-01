@@ -10,7 +10,7 @@ use std::time::Duration;
 use objc2::ClassType;
 use objc2::runtime::AnyObject;
 use objc2_app_kit::{
-    NSBitmapImageFileType, NSBitmapImageRep, NSPasteboard, NSPasteboardURLReadingContentsConformToTypesKey,
+    NSBitmapImageFileType, NSBitmapImageRep, NSPasteboard, NSPasteboardTypeString, NSPasteboardURLReadingContentsConformToTypesKey,
     NSPasteboardURLReadingFileURLsOnlyKey,
 };
 use objc2_foundation::{NSArray, NSDate, NSDateFormatter, NSDictionary, NSHomeDirectory, NSLocale, NSNumber, NSString, NSURL, ns_string};
@@ -117,7 +117,16 @@ pub fn markdown_for_pasteboard(pb: &NSPasteboard, doc: Option<&Path>, paste_dir:
     let urls = unsafe { pb.readObjectsForClasses_options(&NSArray::from_slice(&[NSURL::class()]), Some(&only_images)) };
     let paths: Vec<PathBuf> = urls.iter().flat_map(|a| a.iter()).filter_map(|u| u.downcast::<NSURL>().ok()?.path()).map(|p| PathBuf::from(p.to_string())).collect();
     if !paths.is_empty() {
-        return Ok(Some(paths.iter().map(|p| link(&p.file_stem().unwrap_or_default().to_string_lossy(), p)).collect::<Vec<_>>().join("\n")));
+        let alt = |p: &Path| p.file_stem().unwrap_or_default().to_string_lossy().replace('\\', "\\\\").replace('[', "\\[").replace(']', "\\]");
+        return Ok(Some(paths.iter().map(|p| link(&alt(p), p)).collect::<Vec<_>>().join("\n")));
+    }
+    // A non-image file comes with its icon as TIFF, and Office apps put a
+    // rendering beside copied text: both paste as what they stand for.
+    // SAFETY: AppKit's own constant.
+    let has_text = pb.stringForType(unsafe { NSPasteboardTypeString }).is_some_and(|s| s.length() > 0);
+    let has_file = pb.types().is_some_and(|t| t.containsObject(ns_string!("public.file-url")));
+    if has_text || has_file {
+        return Ok(None);
     }
     let types = ["public.png", "public.jpeg", "public.gif", "public.tiff", "public.heic"].map(NSString::from_str);
     let Some(kind) = pb.availableTypeFromArray(&NSArray::from_retained_slice(&types)) else { return Ok(None) };
