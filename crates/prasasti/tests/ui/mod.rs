@@ -141,9 +141,17 @@ pub fn shortcut(win: &NSWindow, key: &str, mods: NSEventModifierFlags) {
         // SAFETY: a plain getter of the responder chain.
         target = unsafe { r.nextResponder() };
     }
-    let target = target.unwrap_or_else(|| panic!("no responder for {action:?} ({key:?} {mods:?})"));
+    // After the chain, AppKit tries the window controller's document.
+    let target: Retained<objc2::runtime::AnyObject> = match target {
+        Some(r) => r.into(),
+        None => win
+            .windowController()
+            .and_then(|c| unsafe { c.document() }) // SAFETY: a plain getter.
+            .filter(|d| d.class().responds_to(action))
+            .unwrap_or_else(|| panic!("no responder for {action:?} ({key:?} {mods:?})")),
+    };
     // SAFETY: menu actions are `-(void)x:(id)sender`; the sender is the item.
-    let sent = unsafe { app.sendAction_to_from(action, Some(target.as_ref()), Some(item.as_ref())) };
+    let sent = unsafe { app.sendAction_to_from(action, Some(&target), Some(item.as_ref())) };
     assert!(sent, "nothing handled {action:?} for {key:?} {mods:?}");
 }
 

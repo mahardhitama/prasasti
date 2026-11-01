@@ -4,7 +4,7 @@ mod ui;
 
 use std::time::Instant;
 
-use objc2::AnyThread;
+use objc2::{AnyThread, DefinedClass};
 use objc2::rc::{Retained, autoreleasepool};
 use objc2::runtime::{AnyObject, NSObjectProtocol};
 use objc2_app_kit::{
@@ -12,10 +12,10 @@ use objc2_app_kit::{
     NSGlyphProperty, NSPasteboard, NSPasteboardTypeString, NSTextInputClient, NSTextStorage,
 };
 use objc2_foundation::{
-    MainThreadMarker, NSData, NSUserDefaults, NSError, NSNotFound, NSPoint, NSRange, NSRect, NSSize, NSString,
+    MainThreadMarker, NSData, NSURL, NSUserDefaults, NSError, NSNotFound, NSPoint, NSRange, NSRect, NSSize, NSString,
     ns_string,
 };
-use prasasti::document::{HoldReason, PrasastiDocument};
+use prasasti::document::{self, HoldReason, PrasastiDocument};
 use prasasti::editor::{EditorView, make_editor};
 use prasasti::find_bar::FindBar;
 use prasasti::footer::Footer;
@@ -704,6 +704,394 @@ fn font_button_opens_panel() {
     win.close();
 }
 
+// ---- External changes and autosave holds ----
+
+/// A document opened from a file in a fresh temp dir, with a window, as the
+/// document controller would open it (type, URL, modification date).
+struct OnDisk {
+    doc: Retained<PrasastiDocument>,
+    win: Retained<objc2_app_kit::NSWindow>,
+    path: std::path::PathBuf,
+}
+
+impl OnDisk {
+    fn disk(&self) -> String {
+        String::from_utf8(std::fs::read(&self.path).expect("file on disk")).unwrap()
+    }
+    fn write(&self, s: &str) {
+        std::fs::write(&self.path, s).unwrap();
+    }
+    fn text(&self) -> String {
+        self.doc.text().to_string()
+    }
+    /// Types through the window and lets the run loop close the undo group.
+    fn type_text(&self, s: &str) {
+        ui::type_text(&self.win, s);
+        ui::pump(0.05);
+        assert!(self.doc.isDocumentEdited(), "typing marks the document edited");
+    }
+    fn autosave(&self, cancellable: bool) -> bool {
+        let failed = std::rc::Rc::new(std::cell::Cell::new(None));
+        let f = failed.clone();
+        let done = block2::RcBlock::new(move |e: *mut NSError| f.set(Some(!e.is_null())));
+        self.doc.autosaveWithImplicitCancellability_completionHandler(cancellable, &done);
+        wait_until(|| failed.get().is_some());
+        !failed.get().unwrap()
+    }
+    /// File > Save through the menu (⌘S), then waits for the write to land.
+    fn save(&self) {
+        ui::shortcut(&self.win, "s", CMD);
+        wait_until(|| !self.doc.isDocumentEdited());
+    }
+}
+
+/// Pumps the run loop until `f` holds; panics after 5 s.
+fn wait_until(f: impl Fn() -> bool) {
+    let start = Instant::now();
+    while !f() {
+        if start.elapsed().as_secs_f64() > 5.0 {
+            // Name any sheet in the way (an unexpected AppKit alert).
+            for w in NSApplication::sharedApplication(mtm()).windows().iter() {
+                if let Some(sheet) = w.attachedSheet().and_then(|s| s.contentView()) {
+                    eprintln!("sheet open: {:?}", texts_in(&sheet));
+                }
+            }
+            panic!("timed out waiting");
+        }
+        ui::pump(0.02);
+    }
+}
+
+fn disk_date(path: &std::path::Path) -> Retained<objc2_foundation::NSDate> {
+    let url = NSURL::fileURLWithPath(&NSString::from_str(path.to_str().unwrap()));
+    let key = unsafe { objc2_foundation::NSURLContentModificationDateKey };
+    let vals = url.resourceValuesForKeys_error(&objc2_foundation::NSArray::from_slice(&[key])).expect("date");
+    vals.objectForKey(key).expect("date").downcast().expect("NSDate")
+}
+
+/// Runs `f` on a document opened from `initial`, sheets off; cleans up after.
+fn on_disk(name: &str, initial: &str, f: impl FnOnce(&OnDisk)) {
+    let dir = std::env::temp_dir().join(format!(
+        "prasasti-{name}-{}-{}",
+        std::process::id(),
+        std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_nanos()
+    ));
+    std::fs::create_dir_all(&dir).unwrap();
+    let path = dir.join("doc.md");
+    std::fs::write(&path, initial).unwrap();
+    let sheets = document::SHEETS_ENABLED.swap(false, std::sync::atomic::Ordering::SeqCst);
+    let url = NSURL::fileURLWithPath(&NSString::from_str(path.to_str().unwrap()));
+    let doc = PrasastiDocument::new(mtm());
+    doc.readFromURL_ofType_error(&url, ns_string!(MD)).expect("read");
+    doc.setFileURL(Some(&url));
+    doc.setFileType(Some(ns_string!(MD)));
+    doc.setFileModificationDate(Some(&disk_date(&path)));
+    doc.makeWindowControllers();
+    let win = doc.windowControllers().firstObject().and_then(|c| c.window()).expect("window");
+    doc.editor().unwrap().setSelectedRange(NSRange::new(0, 0));
+    let fx = OnDisk { doc, win, path };
+    let r = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| f(&fx)));
+    fx.doc.close();
+    document::SHEETS_ENABLED.store(sheets, std::sync::atomic::Ordering::SeqCst);
+    let _ = std::fs::remove_dir_all(&dir);
+    r.unwrap_or_else(|e| std::panic::resume_unwind(e))
+}
+
+/// External writes get a later mtime than the open, as real ones would.
+fn later() {
+    std::thread::sleep(std::time::Duration::from_millis(20));
+}
+
+fn own_write_ignored() {
+    on_disk("own", "a\n", |fx| {
+        fx.type_text("b");
+        fx.save();
+        assert_eq!(fx.disk(), "ba\n");
+        fx.doc.disk_changed();
+        assert_eq!(fx.doc.hold(), None);
+        assert_eq!(fx.text(), "ba\n");
+    });
+}
+
+fn clean_doc_reloads_silently() {
+    on_disk("clean", "old text\n", |fx| {
+        let editor = fx.doc.editor().unwrap();
+        editor.setSelectedRange(NSRange::new(5, 3));
+        later();
+        fx.write("new\n");
+        fx.doc.disk_changed();
+        assert_eq!(fx.text(), "new\n");
+        assert_eq!(fx.doc.hold(), None);
+        assert!(!fx.doc.isDocumentEdited());
+        // Clamped to the new length (4).
+        assert_eq!(editor.selectedRange(), NSRange::new(4, 0));
+    });
+}
+
+fn edited_doc_holds() {
+    on_disk("edited", "a\n", |fx| {
+        fx.type_text("mine ");
+        later();
+        fx.write("theirs\n");
+        fx.doc.disk_changed();
+        assert_eq!(fx.doc.hold(), Some(HoldReason::ExternalChange));
+        assert_eq!(fx.text(), "mine a\n", "local text kept");
+        assert!(fx.doc.isDocumentEdited());
+    });
+}
+
+fn autosave_skipped_while_held() {
+    on_disk("autosave", "a\n", |fx| {
+        fx.type_text("mine ");
+        later();
+        fx.write("theirs\n");
+        fx.doc.disk_changed();
+        assert!(fx.autosave(true), "an implicit autosave reports success");
+        assert_eq!(fx.disk(), "theirs\n");
+        // A forced autosave (closing, quitting) must fail so the window stays.
+        assert!(!fx.autosave(false), "a forced autosave reports the hold");
+        assert_eq!(fx.disk(), "theirs\n");
+        assert!(fx.doc.isDocumentEdited());
+    });
+}
+
+fn autosave_runs_when_not_held() {
+    on_disk("autosave-free", "a\n", |fx| {
+        fx.type_text("b");
+        assert!(fx.autosave(true));
+        assert_eq!(fx.disk(), "ba\n");
+        // Our own write is not an external change.
+        fx.doc.disk_changed();
+        assert_eq!(fx.doc.hold(), None);
+    });
+}
+
+fn keep_mine_then_save_overwrites() {
+    on_disk("keep", "a\n", |fx| {
+        fx.type_text("mine ");
+        later();
+        fx.write("theirs\n");
+        fx.doc.disk_changed();
+        fx.doc.resolve_external(false);
+        assert_eq!(fx.doc.hold(), Some(HoldReason::ExternalChange), "held until an explicit save");
+        assert!(fx.doc.isDocumentEdited());
+        assert!(fx.autosave(true));
+        assert_eq!(fx.disk(), "theirs\n", "autosave still held");
+        fx.save();
+        assert_eq!(fx.disk(), "mine a\n");
+        assert_eq!(fx.doc.hold(), None);
+    });
+}
+
+fn reload_discards() {
+    on_disk("reload", "a\n", |fx| {
+        fx.type_text("mine ");
+        later();
+        fx.write("theirs\n");
+        fx.doc.disk_changed();
+        fx.doc.resolve_external(true);
+        assert_eq!(fx.text(), "theirs\n");
+        assert_eq!(fx.doc.hold(), None);
+        assert!(!fx.doc.isDocumentEdited());
+    });
+}
+
+fn deleted_file_holds() {
+    on_disk("deleted", "a\n", |fx| {
+        fx.type_text("mine ");
+        std::fs::remove_file(&fx.path).unwrap();
+        fx.doc.disk_changed();
+        assert_eq!(fx.doc.hold(), Some(HoldReason::Deleted));
+        assert!(fx.autosave(true));
+        assert!(!fx.path.exists(), "autosave does not recreate the file");
+        assert_eq!(fx.text(), "mine a\n");
+    });
+}
+
+objc2::define_class!(
+    /// Records the answer of `canCloseDocumentWithDelegate:…`.
+    #[unsafe(super(objc2_foundation::NSObject))]
+    #[ivars = std::cell::Cell<Option<bool>>]
+    struct CloseProbe;
+
+    impl CloseProbe {
+        #[unsafe(method(document:shouldClose:contextInfo:))]
+        fn should_close(&self, _doc: &NSDocument, should: objc2::runtime::Bool, _ctx: *mut std::ffi::c_void) {
+            self.ivars().set(Some(should.as_bool()));
+        }
+    }
+);
+
+/// Closing a held, edited document must not report "can close" (AppKit would
+/// drop the text typed since the hold) nor write the file.
+fn close_while_held_keeps_document() {
+    on_disk("close-held", "a\n", |fx| {
+        fx.type_text("mine ");
+        later();
+        fx.write("theirs\n");
+        fx.doc.disk_changed();
+        let probe: Retained<CloseProbe> = unsafe { objc2::msg_send![super(CloseProbe::alloc().set_ivars(Default::default())), init] };
+        // SAFETY: the selector matches CloseProbe's method; no context.
+        unsafe {
+            fx.doc.canCloseDocumentWithDelegate_shouldCloseSelector_contextInfo(
+                &probe,
+                Some(objc2::sel!(document:shouldClose:contextInfo:)),
+                std::ptr::null_mut(),
+            )
+        };
+        // AppKit tells the user why, as a sheet; the answer comes once it is dismissed.
+        click(&sheet_button(&fx.win, "OK"));
+        wait_until(|| probe.ivars().get().is_some());
+        assert_eq!(probe.ivars().get(), Some(false), "a held document refuses to close");
+        assert_eq!(fx.disk(), "theirs\n");
+        assert_eq!(fx.text(), "mine a\n");
+    });
+}
+
+fn sheet_button(win: &objc2_app_kit::NSWindow, title: &str) -> Retained<NSButton> {
+    wait_until(|| win.attachedSheet().is_some());
+    let sheet = win.attachedSheet().unwrap().contentView().unwrap();
+    buttons_in(&sheet).into_iter().find(|b| b.title().to_string() == title).unwrap_or_else(|| panic!("no {title:?} button"))
+}
+
+fn deleted_sheet_save_writes_back() {
+    on_disk("deleted-save", "a\n", |fx| {
+        document::SHEETS_ENABLED.store(true, std::sync::atomic::Ordering::SeqCst);
+        fx.type_text("mine ");
+        std::fs::remove_file(&fx.path).unwrap();
+        fx.doc.disk_changed();
+        let _ = sheet_button(&fx.win, "Close");
+        click(&sheet_button(&fx.win, "Save"));
+        wait_until(|| fx.path.exists() && !fx.doc.isDocumentEdited());
+        assert_eq!(fx.disk(), "mine a\n");
+        assert_eq!(fx.doc.hold(), None);
+    });
+}
+
+fn removed_file_returns_changed() {
+    on_disk("returns", "a\n", |fx| {
+        std::fs::remove_file(&fx.path).unwrap();
+        fx.doc.disk_changed();
+        assert_eq!(fx.doc.hold(), Some(HoldReason::Deleted));
+        later();
+        fx.write("back\n");
+        fx.doc.disk_changed();
+        assert_eq!(fx.text(), "back\n", "a clean document reloads the new file");
+        assert_eq!(fx.doc.hold(), None);
+    });
+    on_disk("returns-edited", "a\n", |fx| {
+        fx.type_text("mine ");
+        std::fs::remove_file(&fx.path).unwrap();
+        fx.doc.disk_changed();
+        later();
+        fx.write("back\n");
+        fx.doc.disk_changed();
+        assert_eq!(fx.doc.hold(), Some(HoldReason::ExternalChange));
+        assert_eq!(fx.text(), "mine a\n");
+    });
+}
+
+fn crlf_hold_blocks_autosave_until_save() {
+    on_disk("crlf", "a\r\nb", |fx| {
+        assert_eq!(fx.doc.hold(), Some(HoldReason::LineEndings));
+        fx.type_text("x");
+        assert!(fx.autosave(true));
+        assert_eq!(fx.disk(), "a\r\nb", "autosave never writes over CRs");
+        fx.save();
+        assert_eq!(fx.disk(), "xa\nb");
+        assert_eq!(fx.doc.hold(), None);
+    });
+}
+
+fn rename_follows_file() {
+    on_disk("rename", "a\n", |fx| {
+        let new = fx.path.with_file_name("renamed.md");
+        std::fs::rename(&fx.path, &new).unwrap();
+        let url = NSURL::fileURLWithPath(&NSString::from_str(new.to_str().unwrap()));
+        fx.doc.presentedItemDidMoveToURL(&url);
+        wait_until(|| fx.doc.fileURL().and_then(|u| u.path()).is_some_and(|p| p.to_string().ends_with("renamed.md")));
+        fx.type_text("b");
+        assert!(fx.autosave(true));
+        assert_eq!(std::fs::read_to_string(&new).unwrap(), "ba\n");
+        assert!(!fx.path.exists(), "nothing written at the old name");
+    });
+}
+
+fn sheet_keep_mine_button() {
+    on_disk("sheet", "a\n", |fx| {
+        document::SHEETS_ENABLED.store(true, std::sync::atomic::Ordering::SeqCst);
+        fx.type_text("mine ");
+        later();
+        fx.write("theirs\n");
+        fx.doc.disk_changed();
+        let _ = sheet_button(&fx.win, "Reload");
+        click(&sheet_button(&fx.win, "Keep Mine"));
+        wait_until(|| fx.win.attachedSheet().is_none());
+        assert_eq!(fx.doc.hold(), Some(HoldReason::ExternalChange));
+        assert_eq!(fx.text(), "mine a\n");
+        fx.save();
+        assert_eq!(fx.disk(), "mine a\n");
+    });
+}
+
+fn texts_in(v: &objc2_app_kit::NSView) -> Vec<String> {
+    let mut out = Vec::new();
+    for sub in v.subviews().iter() {
+        if let Ok(t) = sub.clone().downcast::<objc2_app_kit::NSTextField>() {
+            out.push(t.stringValue().to_string());
+        }
+        if let Ok(b) = sub.clone().downcast::<NSButton>() {
+            out.push(b.title().to_string());
+        }
+        out.extend(texts_in(&sub));
+    }
+    out
+}
+
+fn buttons_in(v: &objc2_app_kit::NSView) -> Vec<Retained<NSButton>> {
+    let mut out = Vec::new();
+    for sub in v.subviews().iter() {
+        if let Ok(b) = sub.clone().downcast::<NSButton>() {
+            out.push(b);
+        }
+        out.extend(buttons_in(&sub));
+    }
+    out
+}
+
+/// Through the real presenter path: a coordinated write from another thread
+/// reaches `presentedItemDidChange` on the presenter queue, then main.
+fn presenter_reloads_clean_doc() {
+    on_disk("presenter", "a\n", |fx| {
+        // The document controller registers it as a file presenter, as in the app.
+        objc2_app_kit::NSDocumentController::sharedDocumentController(mtm()).addDocument(&fx.doc);
+        let path = fx.path.clone();
+        later();
+        std::thread::spawn(move || {
+            let url = NSURL::fileURLWithPath(&NSString::from_str(path.to_str().unwrap()));
+            let c = objc2_foundation::NSFileCoordinator::initWithFilePresenter(objc2_foundation::NSFileCoordinator::alloc(), None);
+            let block = block2::RcBlock::new(move |u: std::ptr::NonNull<NSURL>| {
+                let p = unsafe { u.as_ref() }.path().unwrap().to_string();
+                std::fs::write(p, "from elsewhere\n").unwrap();
+            });
+            c.coordinateWritingItemAtURL_options_error_byAccessor(
+                &url,
+                objc2_foundation::NSFileCoordinatorWritingOptions::empty(),
+                None,
+                &block,
+            );
+        })
+        .join()
+        .unwrap();
+        let start = Instant::now();
+        while fx.text() != "from elsewhere\n" && start.elapsed().as_secs_f64() < 5.0 {
+            ui::pump(0.05);
+        }
+        assert_eq!(fx.text(), "from elsewhere\n");
+        assert_eq!(fx.doc.hold(), None);
+    });
+}
+
 fn main() {
     let _app = NSApplication::sharedApplication(mtm());
     // Never the user's real defaults domain.
@@ -751,6 +1139,21 @@ fn main() {
         ("counts_words_after_debounce", counts_words_after_debounce),
         ("change_font_stores_family", change_font_stores_family),
         ("font_button_opens_panel", font_button_opens_panel),
+        ("own_write_ignored", own_write_ignored),
+        ("clean_doc_reloads_silently", clean_doc_reloads_silently),
+        ("edited_doc_holds", edited_doc_holds),
+        ("autosave_skipped_while_held", autosave_skipped_while_held),
+        ("autosave_runs_when_not_held", autosave_runs_when_not_held),
+        ("keep_mine_then_save_overwrites", keep_mine_then_save_overwrites),
+        ("reload_discards", reload_discards),
+        ("deleted_file_holds", deleted_file_holds),
+        ("removed_file_returns_changed", removed_file_returns_changed),
+        ("crlf_hold_blocks_autosave_until_save", crlf_hold_blocks_autosave_until_save),
+        ("rename_follows_file", rename_follows_file),
+        ("close_while_held_keeps_document", close_while_held_keeps_document),
+        ("sheet_keep_mine_button", sheet_keep_mine_button),
+        ("deleted_sheet_save_writes_back", deleted_sheet_save_writes_back),
+        ("presenter_reloads_clean_doc", presenter_reloads_clean_doc),
     ];
     let mut failed = 0;
     for (name, f) in tests {
