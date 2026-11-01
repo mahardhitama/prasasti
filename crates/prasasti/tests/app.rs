@@ -142,20 +142,61 @@ fn hidden_markers_have_null_glyphs() {
 
 fn markers_show_at_caret() {
     let (win, e) = ui::window_with("x **b** y");
+    let s = e.storage();
     e.setSelectedRange(NSRange::new(0, 0));
-    ui::pump(0.0);
-    assert!((2..7).any(|i| hidden(e.storage(), i)), "hidden with caret at 0");
-    for _ in 0..4 {
-        ui::key(&win, ui::RIGHT, NSEventModifierFlags::empty());
+    assert!([2, 3, 5, 6].iter().all(|&i| hidden(s, i)), "hidden with caret at 0");
+    let right = || ui::key(&win, ui::RIGHT, NSEventModifierFlags::empty());
+    right();
+    assert_eq!(e.selectedRange().location, 1);
+    right();
+    assert_eq!(e.selectedRange().location, 2, "stops before the opening markers");
+    assert!(!(2..7).any(|i| hidden(s, i)), "shown with caret against the markup");
+    right();
+    assert_eq!(e.selectedRange().location, 3);
+    for _ in 0..5 {
+        right();
     }
-    // TextKit steps over null glyphs, so from 1 the caret lands inside the markup.
-    assert!((2..=7).contains(&e.selectedRange().location));
-    assert!(!(2..7).any(|i| hidden(e.storage(), i)), "shown with caret inside");
-    for _ in 0..4 {
-        ui::key(&win, ui::RIGHT, NSEventModifierFlags::empty());
-    }
-    assert!(e.selectedRange().location >= 8);
-    assert!([2, 3, 5, 6].iter().all(|&i| hidden(e.storage(), i)), "hidden again");
+    assert_eq!(e.selectedRange().location, 8);
+    assert!([2, 3, 5, 6].iter().all(|&i| hidden(s, i)), "hidden again");
+    win.close();
+}
+
+fn typing_before_bold_stays_outside() {
+    let (win, e) = ui::window_with("x **b** y");
+    e.setSelectedRange(NSRange::new(1, 0));
+    ui::key(&win, ui::RIGHT, NSEventModifierFlags::empty());
+    ui::type_text(&win, "new ");
+    assert_eq!(e.string().to_string(), "x new **b** y");
+    win.close();
+}
+
+fn shortcut_selects_all() {
+    let (win, e) = ui::window_with("abc");
+    e.setSelectedRange(NSRange::new(1, 0));
+    ui::shortcut(&win, "a", NSEventModifierFlags::Command);
+    assert_eq!(e.selectedRange(), NSRange::new(0, 3));
+    win.close();
+}
+
+/// Deleting a paragraph shrinks the state cache; undo grows it back.
+fn deleting_fence_line_resyncs_cache() {
+    let (win, e) = ui::window_with("a\n```\nb **c**\n```\nd **e**");
+    let s = e.storage();
+    let original = |s: &NSTextStorage| {
+        assert!(has_code_bg(s, 6) && !is_bold(s, 10), "b **c** is code");
+        assert!(!has_code_bg(s, 18) && is_bold(s, 22), "d **e** is prose");
+    };
+    original(s);
+    e.setSelectedRange(NSRange::new(2, 4));
+    ui::key(&win, ui::BACKSPACE, NSEventModifierFlags::empty());
+    assert_eq!(e.string().to_string(), "a\nb **c**\n```\nd **e**");
+    assert!(!has_code_bg(s, 2) && is_bold(s, 6), "b **c** prose and bold");
+    assert!([4, 5, 7, 8].iter().all(|&i| hidden(s, i)), "its markers hidden");
+    assert!(has_code_bg(s, 14) && !is_bold(s, 18), "d **e** now code");
+    ui::pump(0.05);
+    ui::shortcut(&win, "z", NSEventModifierFlags::Command);
+    assert_eq!(e.string().to_string(), "a\n```\nb **c**\n```\nd **e**");
+    original(s);
     win.close();
 }
 
@@ -216,6 +257,9 @@ fn main() {
         ("fence_settles", fence_settles),
         ("hidden_markers_have_null_glyphs", hidden_markers_have_null_glyphs),
         ("markers_show_at_caret", markers_show_at_caret),
+        ("typing_before_bold_stays_outside", typing_before_bold_stays_outside),
+        ("shortcut_selects_all", shortcut_selects_all),
+        ("deleting_fence_line_resyncs_cache", deleting_fence_line_resyncs_cache),
         ("typing_styles_live", typing_styles_live),
         ("styles_bold_after_emoji", styles_bold_after_emoji),
         ("restyles_2mb_under_1s", restyles_2mb_under_1s),

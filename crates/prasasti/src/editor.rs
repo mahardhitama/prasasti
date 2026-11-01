@@ -102,6 +102,11 @@ define_class!(
     unsafe impl NSTextDelegate for EditorView {}
 
     unsafe impl NSTextViewDelegate for EditorView {
+        #[unsafe(method(textView:willChangeSelectionFromCharacterRange:toCharacterRange:))]
+        fn will_change_selection(&self, _tv: &NSTextView, old: NSRange, new: NSRange) -> NSRange {
+            caret_before_hidden(self.storage(), old, new)
+        }
+
         #[unsafe(method(textViewDidChangeSelection:))]
         fn text_view_did_change_selection(&self, _note: &NSNotification) {
             let new = self.selectedRange().location;
@@ -149,6 +154,26 @@ define_class!(
         fn find_previous(&self, _sender: Option<&AnyObject>) {}
     }
 );
+
+/// Hidden markers share one visual spot with the character after them, so
+/// TextKit's forward step jumps over them and the caret could never stop right
+/// before `**` (where typing stays outside the markup). A forward caret move
+/// that ends just past a run of hidden characters stops at the run's start
+/// instead; the caret there reveals the markers and the next step is normal.
+fn caret_before_hidden(storage: &NSTextStorage, old: NSRange, new: NSRange) -> NSRange {
+    if old.length != 0 || new.length != 0 || new.location <= old.location {
+        return new;
+    }
+    let hidden = |i: usize| {
+        // SAFETY: a null effective-range pointer is allowed; `i` is in the text.
+        unsafe { storage.attribute_atIndex_effectiveRange(hidden_key(), i, std::ptr::null_mut()) }.is_some()
+    };
+    let mut start = new.location.min(storage.length());
+    while start > old.location && hidden(start - 1) {
+        start -= 1;
+    }
+    if start > old.location && start < new.location { NSRange::new(start, 0) } else { new }
+}
 
 impl EditorView {
     pub fn storage(&self) -> &NSTextStorage {
