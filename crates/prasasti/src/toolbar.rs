@@ -2,11 +2,15 @@
 
 use objc2::rc::Retained;
 use objc2::runtime::{AnyObject, Sel};
-use objc2_app_kit::{NSSegmentSwitchTracking, NSSegmentedControl, NSView};
+use objc2_app_kit::{NSControlBorderShape, NSControlSize, NSSegmentStyle, NSSegmentSwitchTracking, NSSegmentedControl, NSView};
 use objc2_foundation::{MainThreadMarker, NSArray, NSString};
 
 use crate::content::Mode;
 use crate::glass::GlassView;
+
+/// Track padding around the segments, and each segment's width.
+const PAD: f64 = 4.0;
+const SEGMENT_WIDTH: f64 = 110.0;
 
 pub struct Toolbar {
     glass: Retained<GlassView>,
@@ -27,15 +31,22 @@ impl Toolbar {
                 mtm,
             )
         };
+        // macOS 26's native capsule look: a raised glass thumb on a capsule track.
+        segment.setControlSize(NSControlSize::ExtraLarge);
+        segment.setSegmentStyle(NSSegmentStyle::Capsule);
+        segment.setBorderShape(NSControlBorderShape::Capsule);
+        for i in 0..2 {
+            segment.setWidth_forSegment(SEGMENT_WIDTH, i);
+        }
         let glass = GlassView::new(mtm);
         glass.setContentView(Some(&segment));
-        glass.setCornerRadius(18.0);
+        glass.setCornerRadius((segment.fittingSize().height + 2.0 * PAD) / 2.0);
         segment.setTranslatesAutoresizingMaskIntoConstraints(false);
         for c in [
-            segment.leadingAnchor().constraintEqualToAnchor_constant(&glass.leadingAnchor(), 6.0),
-            glass.trailingAnchor().constraintEqualToAnchor_constant(&segment.trailingAnchor(), 6.0),
-            segment.topAnchor().constraintEqualToAnchor_constant(&glass.topAnchor(), 6.0),
-            glass.bottomAnchor().constraintEqualToAnchor_constant(&segment.bottomAnchor(), 6.0),
+            segment.leadingAnchor().constraintEqualToAnchor_constant(&glass.leadingAnchor(), PAD),
+            glass.trailingAnchor().constraintEqualToAnchor_constant(&segment.trailingAnchor(), PAD),
+            segment.topAnchor().constraintEqualToAnchor_constant(&glass.topAnchor(), PAD),
+            glass.bottomAnchor().constraintEqualToAnchor_constant(&segment.bottomAnchor(), PAD),
         ] {
             c.setActive(true);
         }

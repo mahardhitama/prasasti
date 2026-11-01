@@ -100,49 +100,57 @@ define_class!(
         // Before the window's own undo:/redo:, so Preview can refuse them.
         #[unsafe(method(undo:))]
         fn undo(&self, _sender: Option<&AnyObject>) {
-            if self.mode() == Mode::Edit {
-                guarded(|| self.undoManager().map(|u| u.undo()));
-            }
+            guarded(|| {
+                if let Some(u) = self.undoManager().filter(|_| self.mode() == Mode::Edit) {
+                    u.undo();
+                }
+            });
         }
         #[unsafe(method(redo:))]
         fn redo(&self, _sender: Option<&AnyObject>) {
-            if self.mode() == Mode::Edit {
-                guarded(|| self.undoManager().map(|u| u.redo()));
-            }
+            guarded(|| {
+                if let Some(u) = self.undoManager().filter(|_| self.mode() == Mode::Edit) {
+                    u.redo();
+                }
+            });
         }
 
         // The editor handles these itself in Edit; here only in Preview.
         #[unsafe(method(showFindBar:))]
         fn show_find_bar(&self, sender: Option<&AnyObject>) {
-            guarded(|| self.set_mode(Mode::Edit));
-            // SAFETY: the editor's own action, same signature.
-            let () = unsafe { msg_send![&*self.ivars().editor, showFindBar: sender] };
+            guarded(|| {
+                self.set_mode(Mode::Edit);
+                // SAFETY: the editor's own action, same signature.
+                let () = unsafe { msg_send![&*self.ivars().editor, showFindBar: sender] };
+            });
         }
         #[unsafe(method(showFindReplaceBar:))]
         fn show_find_replace_bar(&self, sender: Option<&AnyObject>) {
-            guarded(|| self.set_mode(Mode::Edit));
-            // SAFETY: the editor's own action, same signature.
-            let () = unsafe { msg_send![&*self.ivars().editor, showFindReplaceBar: sender] };
+            guarded(|| {
+                self.set_mode(Mode::Edit);
+                // SAFETY: the editor's own action, same signature.
+                let () = unsafe { msg_send![&*self.ivars().editor, showFindReplaceBar: sender] };
+            });
         }
         #[unsafe(method(zoomIn:))]
         fn zoom_in(&self, sender: Option<&AnyObject>) {
             // SAFETY: the editor's own action, same signature.
-            let () = unsafe { msg_send![&*self.ivars().editor, zoomIn: sender] };
+            guarded(|| -> () { unsafe { msg_send![&*self.ivars().editor, zoomIn: sender] } });
         }
         #[unsafe(method(zoomOut:))]
         fn zoom_out(&self, sender: Option<&AnyObject>) {
             // SAFETY: the editor's own action, same signature.
-            let () = unsafe { msg_send![&*self.ivars().editor, zoomOut: sender] };
+            guarded(|| -> () { unsafe { msg_send![&*self.ivars().editor, zoomOut: sender] } });
         }
         #[unsafe(method(resetZoom:))]
         fn reset_zoom(&self, sender: Option<&AnyObject>) {
             // SAFETY: the editor's own action, same signature.
-            let () = unsafe { msg_send![&*self.ivars().editor, resetZoom: sender] };
+            guarded(|| -> () { unsafe { msg_send![&*self.ivars().editor, resetZoom: sender] } });
         }
         #[unsafe(method(copyAsHTML:))]
         fn copy_as_html(&self, sender: Option<&AnyObject>) {
             // SAFETY: the editor's own action, same signature.
-            let () = unsafe { msg_send![&*self.ivars().editor, copyAsHTML: sender] };
+            guarded(|| -> () { unsafe { msg_send![&*self.ivars().editor, copyAsHTML: sender] } });
         }
 
         #[unsafe(method(renderPreview:))]

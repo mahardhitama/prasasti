@@ -2185,6 +2185,7 @@ fn preview_rerenders_after_reload() {
         assert_eq!(fx.doc.hold(), Some(HoldReason::ExternalChange));
         fx.doc.resolve_external(true);
         assert_eq!(fx.text(), "theirs\n");
+        assert_eq!(fx.doc.hold(), None);
         let start = Instant::now();
         while !v.preview_html().unwrap_or_default().contains("theirs") && start.elapsed().as_secs_f64() < 0.5 {
             ui::pump(0.02);
@@ -2201,6 +2202,25 @@ fn autosave_unaffected_by_mode() {
         assert!(fx.autosave(true));
         assert_eq!(fx.disk(), "ba\n");
     });
+}
+
+fn view_menu_checks_active_mode() {
+    let (win, _e) = ui::window_with("x");
+    let v = content_of(&win);
+    let view = NSApplication::sharedApplication(mtm()).mainMenu().unwrap().itemWithTitle(ns_string!("View")).unwrap().submenu().unwrap();
+    let preview = view.itemWithTitle(ns_string!("Preview")).expect("View > Preview");
+    let edit = view.itemWithTitle(ns_string!("Edit")).expect("View > Edit");
+    let on = objc2_app_kit::NSControlStateValueOn;
+    let state = |item: &objc2_app_kit::NSMenuItem| {
+        // SAFETY: `-(BOOL)validateMenuItem:(NSMenuItem *)item`.
+        let ok: bool = unsafe { objc2::msg_send![&*v, validateMenuItem: item] };
+        assert!(ok);
+        item.state() == on
+    };
+    assert_eq!((state(&preview), state(&edit)), (false, true));
+    v.set_mode(Mode::Preview);
+    assert_eq!((state(&preview), state(&edit)), (true, false));
+    win.close();
 }
 
 fn main() {
@@ -2322,6 +2342,7 @@ fn main() {
         ("cmd_f_in_preview_opens_find_in_edit", cmd_f_in_preview_opens_find_in_edit),
         ("preview_rerenders_after_reload", preview_rerenders_after_reload),
         ("autosave_unaffected_by_mode", autosave_unaffected_by_mode),
+        ("view_menu_checks_active_mode", view_menu_checks_active_mode),
     ];
     let mut failed = 0;
     for (name, f) in tests {
