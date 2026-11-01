@@ -28,16 +28,65 @@ fn is_blank(c: u16) -> bool {
     matches!(c, 0x20 | 0x09)
 }
 
-/// True for every unit inside a `Code` or `Fence` span.
-/// shortcut: indented code blocks are not detected (`style_paragraph` has no
-/// such block), so an image in one is still rewritten; upgrade if it matters.
+/// Leading columns (tab stops of 4) and the index of the first other unit.
+fn indent_of(line: &[u16]) -> (usize, usize) {
+    let (mut cols, mut i) = (0, 0);
+    while let Some(&c) = line.get(i) {
+        match c {
+            0x20 => cols += 1,
+            0x09 => cols += 4 - cols % 4,
+            _ => break,
+        }
+        i += 1;
+    }
+    (cols, i)
+}
+
+/// `-`, `+`, `*` or `1.`/`1)` followed by a space or the line end.
+fn is_list_item(rest: &[u16]) -> bool {
+    let digits = rest.iter().take_while(|&&c| (0x30..=0x39).contains(&c)).count();
+    let after = if digits > 0 && matches!(rest.get(digits), Some(0x2e | 0x29)) {
+        digits + 1
+    } else if matches!(rest.first(), Some(0x2d | 0x2b | 0x2a)) {
+        1
+    } else {
+        return false;
+    };
+    rest.get(after).is_none_or(|&c| is_blank(c))
+}
+
+/// True for every unit inside a `Code` or `Fence` span or an indented code
+/// block (4+ columns after a blank line or the text start, outside a list).
 fn code_mask(text: &[u16]) -> Vec<bool> {
     let mut mask = vec![false; text.len()];
     let mut state = BlockState::Prose;
-    let mut start = 0;
+    let (mut start, mut prev_blank, mut in_code, mut in_list) = (0, true, false, false);
     while start <= text.len() {
         let end = text[start..].iter().position(|&c| matches!(c, 0x0a | 0x0d | 0x2029)).map_or(text.len(), |k| start + k);
-        let (spans, next) = style_paragraph(&text[start..end], state, None);
+        let line = &text[start..end];
+        if state == BlockState::Prose {
+            let (cols, at) = indent_of(line);
+            if at == line.len() {
+                // Blank: an indented block may go on after it.
+                prev_blank = true;
+            } else {
+                if cols >= 4 {
+                    in_code = in_code || (prev_blank && !in_list);
+                } else {
+                    in_code = false;
+                    if is_list_item(&line[at..]) {
+                        in_list = true;
+                    } else if prev_blank {
+                        in_list = false;
+                    }
+                }
+                if in_code {
+                    mask[start..end].fill(true);
+                }
+                prev_blank = false;
+            }
+        }
+        let (spans, next) = style_paragraph(line, state, None);
         state = next;
         for s in spans.iter().filter(|s| matches!(s.kind, StyleKind::Code | StyleKind::Fence)) {
             if let Some(m) = mask.get_mut(start + s.range.start..start + s.range.end) {
@@ -262,7 +311,10 @@ pub fn rebase(
         } else if p.is_empty() || p[0] == u('#') || has_scheme(p) || starts_with(p, "//") {
             continue;
         } else if let Some(old) = old_dir.filter(|&o| components(o) != components(new_dir)) {
-            relative_path(new_dir, &[old, &[SLASH], p].concat())
+            // Normalised, so `remap` sees the same key as for an absolute destination.
+            let abs = [&[SLASH][..], &components(&[old, &[SLASH], p].concat()).join(&SLASH)].concat();
+            let abs = remap(&abs).unwrap_or(abs);
+            relative_path(new_dir, &abs)
         } else {
             continue;
         };
@@ -385,6 +437,36 @@ mod tests {
     fn remap_used() {
         let r = rb_with("![a](/p/i.png)", None, "/d", |p| (p == w("/p/i.png")).then(|| w("/d/x.assets/i.png")));
         assert_eq!(r, some("![a](x.assets/i.png)"));
+    }
+
+    #[test]
+    fn remap_used_for_relative() {
+        let r = rb_with("![a](x.assets/i.png)", Some("/o"), "/n", |p| {
+            (p == w("/o/x.assets/i.png")).then(|| w("/n/y.assets/i.png"))
+        });
+        assert_eq!(r, some("![a](y.assets/i.png)"));
+    }
+
+    #[test]
+    fn indented_code_kept() {
+        let img = "![a](/d/i.png)";
+        for t in [
+            format!("    {img}"),
+            format!("\t{img}"),
+            format!("para\n\n    x\n\n    {img}"),
+            format!("- a\n\npara\n\n    {img}"),
+        ] {
+            assert_eq!(rb(&t, None, "/d"), None, "{t:?}");
+        }
+        // Not code: paragraph continuation, list content, after unindented text.
+        for t in [
+            format!("para\n    {img}"),
+            format!("- a\n\n    {img}"),
+            format!("1. a\n    {img}"),
+            format!("    code\n{img}"),
+        ] {
+            assert!(rb(&t, None, "/d").is_some(), "{t:?}");
+        }
     }
 
     #[test]
