@@ -109,6 +109,10 @@ pub fn install(app: &NSApplication, mtm: MainThreadMarker) {
         unsafe { fonts.setTarget(Some(&NSFontManager::sharedFontManager(mtm))) };
     }
     let view = menu(mtm, "View", &[
+        s("Preview", sel!(showPreview:), "", CMD),
+        s("Edit", sel!(showEditor:), "", CMD),
+        s("Toggle Preview", sel!(togglePreview:), "e", CMD),
+        None,
         s("Zoom In", sel!(zoomIn:), "=", CMD),
         s("Zoom Out", sel!(zoomOut:), "-", CMD),
         s("Actual Size", sel!(resetZoom:), "0", CMD),
@@ -119,7 +123,7 @@ pub fn install(app: &NSApplication, mtm: MainThreadMarker) {
     let plus = item(mtm, "Zoom In", Some(sel!(zoomIn:)), "+");
     plus.setHidden(true);
     plus.setAllowsKeyEquivalentWhenHidden(true);
-    view.insertItem_atIndex(&plus, 1);
+    view.insertItem_atIndex(&plus, 5);
     let window = menu(mtm, "Window", &[
         s("Minimize", sel!(performMiniaturize:), "m", CMD),
         s("Zoom", sel!(performZoom:), "", CMD),

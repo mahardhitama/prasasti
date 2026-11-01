@@ -15,6 +15,7 @@ use objc2_foundation::{
     MainThreadMarker, NSData, NSURL, NSUserDefaults, NSError, NSNotFound, NSPoint, NSRange, NSRect, NSSize, NSString,
     ns_string,
 };
+use prasasti::content::{DocumentView, Mode};
 use prasasti::document::{self, HoldReason, PrasastiDocument};
 use prasasti::editor::{EditorView, make_editor};
 use prasasti::find_bar::FindBar;
@@ -940,6 +941,8 @@ fn on_disk(name: &str, initial: &str, f: impl FnOnce(&OnDisk)) {
     doc.setFileModificationDate(Some(&disk_date(&path)));
     doc.makeWindowControllers();
     let win = doc.windowControllers().firstObject().and_then(|c| c.window()).expect("window");
+    // Files open in Preview; these tests type.
+    content_of(&win).set_mode(Mode::Edit);
     doc.editor().unwrap().setSelectedRange(NSRange::new(0, 0));
     let fx = OnDisk { doc, win, path };
     let r = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| f(&fx)));
@@ -1627,6 +1630,8 @@ fn controller_doc(name: &str, initial: &[u8], f: impl FnOnce(&PrasastiDocument, 
     dc.addDocument(&doc);
     doc.makeWindowControllers();
     let win = doc.windowControllers().firstObject().and_then(|c| c.window()).expect("window");
+    // Files open in Preview; these tests type.
+    content_of(&win).set_mode(Mode::Edit);
     doc.editor().unwrap().setSelectedRange(NSRange::new(0, 0));
     let r = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| f(&doc, &win, &path)));
     doc.close();
@@ -2058,6 +2063,7 @@ fn kitchen_sink_lines_fit_column() {
     let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../fixtures/kitchen-sink/kitchen-sink.md");
     let text = std::fs::read_to_string(path).expect("fixture");
     let (win, e) = ui::window_with(&text);
+    content_of(&win).set_mode(Mode::Edit);
     // SAFETY: plain getters of the editor's TextKit 1 chain.
     let (lm, tc) = unsafe { (e.layoutManager().unwrap(), e.textContainer().unwrap()) };
     lm.ensureLayoutForTextContainer(&tc);
@@ -2077,6 +2083,124 @@ fn kitchen_sink_lines_fit_column() {
     }
     assert!(lines > 100, "{lines} lines");
     win.close();
+}
+
+// ---- Modes ----
+
+fn content_of(win: &objc2_app_kit::NSWindow) -> Retained<DocumentView> {
+    win.contentView().expect("content").downcast::<DocumentView>().expect("DocumentView")
+}
+
+fn file_opens_in_preview_untitled_in_edit() {
+    let d = doc_from(b"# hi\n");
+    d.makeWindowControllers();
+    let v = content_of(&document_window(&d));
+    assert_eq!(v.mode(), Mode::Preview);
+    assert_eq!(v.toolbar().selected(), Mode::Preview);
+    assert!(v.preview_html().expect("rendered").contains("<h1>hi</h1>"));
+    d.close();
+    let u = PrasastiDocument::new(mtm());
+    u.makeWindowControllers();
+    let v = content_of(&document_window(&u));
+    assert_eq!(v.mode(), Mode::Edit);
+    assert_eq!(v.preview_html(), None, "the web view is created on first switch");
+    u.close();
+}
+
+fn cmd_e_toggles_mode() {
+    let (win, e) = ui::window_with("x");
+    let v = content_of(&win);
+    assert_eq!(v.mode(), Mode::Edit);
+    ui::shortcut(&win, "e", CMD);
+    assert_eq!(v.mode(), Mode::Preview);
+    assert_eq!(v.toolbar().selected(), Mode::Preview);
+    assert!(e.enclosingScrollView().unwrap().isHidden());
+    ui::shortcut(&win, "e", CMD);
+    assert_eq!(v.mode(), Mode::Edit);
+    assert_eq!(v.toolbar().selected(), Mode::Edit);
+    assert!(!e.enclosingScrollView().unwrap().isHidden());
+    assert!(is_first_responder(&win, &e));
+    win.close();
+}
+
+fn toolbar_click_switches_mode() {
+    let (win, _e) = ui::window_with("x");
+    let v = content_of(&win);
+    let seg = v.toolbar().segment();
+    for (i, want) in [(0, Mode::Preview), (1, Mode::Edit)] {
+        seg.setSelectedSegment(i);
+        // SAFETY: the control's own action and target.
+        unsafe { seg.sendAction_to(seg.action(), seg.target().as_deref()) };
+        assert_eq!(v.mode(), want);
+    }
+    win.close();
+}
+
+fn preview_ignores_typing_and_edit_commands() {
+    let (win, e) = ui::window_with("- a");
+    e.setSelectedRange(NSRange::new(3, 0));
+    ui::type_text(&win, "q");
+    ui::pump(0.05);
+    let before = e.string().to_string();
+    let v = content_of(&win);
+    ui::shortcut(&win, "e", CMD);
+    assert_eq!(v.mode(), Mode::Preview);
+    ui::type_text(&win, "zz");
+    assert!(!ui::enabled(&win, "b", CMD), "formatting is disabled in Preview");
+    assert!(!ui::enabled(&win, "z", CMD), "undo is disabled in Preview");
+    with_clipboard("PASTED", || {
+        for k in ["b", "v", "z", "x"] {
+            if ui::enabled(&win, k, CMD) {
+                ui::shortcut(&win, k, CMD);
+            }
+        }
+    });
+    ui::key(&win, "\t", NSEventModifierFlags::empty());
+    ui::pump(0.2);
+    assert_eq!(e.string().to_string(), before);
+    ui::shortcut(&win, "e", CMD);
+    ui::type_text(&win, "x");
+    assert_eq!(e.string().to_string(), "- aqx");
+    win.close();
+}
+
+fn cmd_f_in_preview_opens_find_in_edit() {
+    let (win, e) = ui::window_with("x");
+    let v = content_of(&win);
+    v.set_mode(Mode::Preview);
+    ui::shortcut(&win, "f", CMD);
+    assert_eq!(v.mode(), Mode::Edit);
+    assert!(!find_bar(&e).isHidden());
+    win.close();
+}
+
+fn preview_rerenders_after_reload() {
+    on_disk("rerender", "a\n", |fx| {
+        fx.type_text("mine ");
+        let v = content_of(&fx.win);
+        v.set_mode(Mode::Preview);
+        later();
+        fx.write("theirs\n");
+        fx.doc.disk_changed();
+        assert_eq!(fx.doc.hold(), Some(HoldReason::ExternalChange));
+        fx.doc.resolve_external(true);
+        assert_eq!(fx.text(), "theirs\n");
+        let start = Instant::now();
+        while !v.preview_html().unwrap_or_default().contains("theirs") && start.elapsed().as_secs_f64() < 0.5 {
+            ui::pump(0.02);
+        }
+        assert!(v.preview_html().unwrap_or_default().contains("theirs"), "{:?}", v.preview_html());
+    });
+}
+
+fn autosave_unaffected_by_mode() {
+    on_disk("autosave-mode", "a\n", |fx| {
+        fx.type_text("b");
+        ui::shortcut(&fx.win, "e", CMD);
+        assert_eq!(content_of(&fx.win).mode(), Mode::Preview);
+        assert!(fx.autosave(true));
+        assert_eq!(fx.disk(), "ba\n");
+    });
 }
 
 fn main() {
@@ -2191,6 +2315,13 @@ fn main() {
         ("last_closed_window_frame_is_stored", last_closed_window_frame_is_stored),
         ("resize_in_place_is_stored_without_closing", resize_in_place_is_stored_without_closing),
         ("no_window_tabbing", no_window_tabbing),
+        ("file_opens_in_preview_untitled_in_edit", file_opens_in_preview_untitled_in_edit),
+        ("cmd_e_toggles_mode", cmd_e_toggles_mode),
+        ("toolbar_click_switches_mode", toolbar_click_switches_mode),
+        ("preview_ignores_typing_and_edit_commands", preview_ignores_typing_and_edit_commands),
+        ("cmd_f_in_preview_opens_find_in_edit", cmd_f_in_preview_opens_find_in_edit),
+        ("preview_rerenders_after_reload", preview_rerenders_after_reload),
+        ("autosave_unaffected_by_mode", autosave_unaffected_by_mode),
     ];
     let mut failed = 0;
     for (name, f) in tests {

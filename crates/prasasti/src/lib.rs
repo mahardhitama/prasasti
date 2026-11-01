@@ -10,6 +10,7 @@ pub mod settings;
 pub mod status;
 pub mod styler;
 pub mod theme;
+pub mod toolbar;
 pub mod util;
 
 use objc2::ClassType;

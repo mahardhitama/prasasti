@@ -21,7 +21,7 @@ use objc2_foundation::{
 };
 use prasasti_core::file::{decode, normalize_newlines, saves_unchanged};
 
-use crate::content::DocumentView;
+use crate::content::{DocumentView, Mode};
 use crate::editor::EditorView;
 use crate::util::{Observer, guarded, observe};
 
@@ -59,6 +59,8 @@ pub struct Ivars {
     sheet_gen: Cell<u64>,
     /// Saves the window's frame when it moves, resizes or closes.
     frame_observers: RefCell<Vec<Observer>>,
+    /// Read from a file (or a recovery draft): the window opens in Preview.
+    read_from_disk: Cell<bool>,
 }
 
 impl Ivars {
@@ -73,6 +75,7 @@ impl Ivars {
             sheet: RefCell::new(None),
             sheet_gen: Cell::new(0),
             frame_observers: RefCell::new(Vec::new()),
+            read_from_disk: Cell::new(false),
         }
     }
 }
@@ -195,6 +198,7 @@ define_class!(
             .into();
             // A restored frame may be narrower than the column.
             content.update_min_width();
+            content.set_mode(if self.ivars().read_from_disk.get() { Mode::Preview } else { Mode::Edit });
             self.addWindowController(&controller);
             *self.ivars().editor.borrow_mut() = Some(editor);
             self.set_hold(self.hold());
@@ -221,6 +225,7 @@ define_class!(
             self.set_hold(hold);
             *ivars.last_known.borrow_mut() = Some(raw);
             *ivars.text.borrow_mut() = NSString::from_str(&text);
+            ivars.read_from_disk.set(true);
             if let Some(editor) = &*ivars.editor.borrow() {
                 editor.setString(&ivars.text.borrow());
             }

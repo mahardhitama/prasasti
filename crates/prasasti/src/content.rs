@@ -1,21 +1,36 @@
 //! The document window's content view: the editor's scroll view fills the
 //! window (under the transparent titlebar), the find bar sits below the
-//! titlebar, and the status pill floats near the bottom.
+//! titlebar, and the status pill floats near the bottom, above the toolbar.
+//! It also owns the window's mode: Edit shows the editor, Preview hides it
+//! (it stays in the window, the only source of truth) and shows a web view.
 
-use std::cell::{OnceCell, RefCell};
+use std::cell::{Cell, OnceCell, RefCell};
 
 use objc2::rc::{Retained, Weak};
-use objc2::{DefinedClass, MainThreadOnly, define_class, msg_send};
+use objc2::runtime::AnyObject;
+use objc2::{DefinedClass, MainThreadOnly, define_class, msg_send, sel};
 use objc2_app_kit::{
-    NSControlSize, NSLayoutConstraint, NSResponder, NSScreen, NSScrollView, NSScroller, NSView,
+    NSControlSize, NSControlStateValueOff, NSControlStateValueOn, NSLayoutConstraint, NSMenuItem, NSResponder,
+    NSScreen, NSScrollView, NSScroller, NSTextStorageDidProcessEditingNotification, NSView, NSWindowOrderingMode,
 };
-use objc2_foundation::{MainThreadMarker, NSArray, NSEdgeInsets, NSObject, NSObjectProtocol, NSRect};
+use objc2_foundation::{MainThreadMarker, NSArray, NSEdgeInsets, NSObject, NSObjectProtocol, NSRect, NSString, NSTimer};
+use objc2_web_kit::{WKWebView, WKWebViewConfiguration};
 
 use crate::editor::{EditorView, editor_in_scroll};
 use crate::find_bar::FindBar;
 use crate::settings;
 use crate::status::StatusPill;
+use crate::toolbar::Toolbar;
 use crate::util::{Observer, guarded, observe};
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Mode {
+    Preview,
+    Edit,
+}
+
+/// Preview re-renders at most this often while the text changes underneath it.
+const RENDER_DELAY: f64 = 0.25;
 
 /// Room left at the bottom of the text for the floating toolbar.
 const BOTTOM_INSET: f64 = 64.0;
@@ -30,7 +45,15 @@ pub struct Ivars {
     /// The scroll view's top: (the view's top, while the find bar is hidden;
     /// the bar's bottom, while it shows).
     tops: OnceCell<[Retained<NSLayoutConstraint>; 2]>,
-    observer: RefCell<Option<Observer>>,
+    observers: RefCell<Vec<Observer>>,
+    toolbar: Toolbar,
+    mode: Cell<Mode>,
+    /// Created on the first switch to Preview.
+    web: OnceCell<Retained<WKWebView>>,
+    /// The last HTML handed to the web view.
+    html: RefCell<Option<String>>,
+    /// A pending Preview re-render.
+    timer: RefCell<Option<Retained<NSTimer>>>,
 }
 
 define_class!(
@@ -56,6 +79,86 @@ define_class!(
             let () = unsafe { msg_send![super(self), layout] };
             guarded(|| self.apply_insets());
         }
+
+        #[unsafe(method(modeChanged:))]
+        fn mode_changed(&self, _sender: Option<&AnyObject>) {
+            guarded(|| self.set_mode(self.ivars().toolbar.selected()));
+        }
+        #[unsafe(method(showPreview:))]
+        fn show_preview(&self, _sender: Option<&AnyObject>) {
+            guarded(|| self.set_mode(Mode::Preview));
+        }
+        #[unsafe(method(showEditor:))]
+        fn show_editor(&self, _sender: Option<&AnyObject>) {
+            guarded(|| self.set_mode(Mode::Edit));
+        }
+        #[unsafe(method(togglePreview:))]
+        fn toggle_preview(&self, _sender: Option<&AnyObject>) {
+            guarded(|| self.set_mode(if self.mode() == Mode::Preview { Mode::Edit } else { Mode::Preview }));
+        }
+
+        // Before the window's own undo:/redo:, so Preview can refuse them.
+        #[unsafe(method(undo:))]
+        fn undo(&self, _sender: Option<&AnyObject>) {
+            if self.mode() == Mode::Edit {
+                guarded(|| self.undoManager().map(|u| u.undo()));
+            }
+        }
+        #[unsafe(method(redo:))]
+        fn redo(&self, _sender: Option<&AnyObject>) {
+            if self.mode() == Mode::Edit {
+                guarded(|| self.undoManager().map(|u| u.redo()));
+            }
+        }
+
+        // The editor handles these itself in Edit; here only in Preview.
+        #[unsafe(method(showFindBar:))]
+        fn show_find_bar(&self, sender: Option<&AnyObject>) {
+            guarded(|| self.set_mode(Mode::Edit));
+            // SAFETY: the editor's own action, same signature.
+            let () = unsafe { msg_send![&*self.ivars().editor, showFindBar: sender] };
+        }
+        #[unsafe(method(showFindReplaceBar:))]
+        fn show_find_replace_bar(&self, sender: Option<&AnyObject>) {
+            guarded(|| self.set_mode(Mode::Edit));
+            // SAFETY: the editor's own action, same signature.
+            let () = unsafe { msg_send![&*self.ivars().editor, showFindReplaceBar: sender] };
+        }
+        #[unsafe(method(zoomIn:))]
+        fn zoom_in(&self, sender: Option<&AnyObject>) {
+            // SAFETY: the editor's own action, same signature.
+            let () = unsafe { msg_send![&*self.ivars().editor, zoomIn: sender] };
+        }
+        #[unsafe(method(zoomOut:))]
+        fn zoom_out(&self, sender: Option<&AnyObject>) {
+            // SAFETY: the editor's own action, same signature.
+            let () = unsafe { msg_send![&*self.ivars().editor, zoomOut: sender] };
+        }
+        #[unsafe(method(resetZoom:))]
+        fn reset_zoom(&self, sender: Option<&AnyObject>) {
+            // SAFETY: the editor's own action, same signature.
+            let () = unsafe { msg_send![&*self.ivars().editor, resetZoom: sender] };
+        }
+        #[unsafe(method(copyAsHTML:))]
+        fn copy_as_html(&self, sender: Option<&AnyObject>) {
+            // SAFETY: the editor's own action, same signature.
+            let () = unsafe { msg_send![&*self.ivars().editor, copyAsHTML: sender] };
+        }
+
+        #[unsafe(method(renderPreview:))]
+        fn render_preview(&self, _timer: &NSTimer) {
+            guarded(|| {
+                self.ivars().timer.borrow_mut().take();
+                if self.mode() == Mode::Preview {
+                    self.render();
+                }
+            });
+        }
+
+        #[unsafe(method(validateMenuItem:))]
+        fn validate_menu_item(&self, item: &NSMenuItem) -> bool {
+            guarded(|| self.validate(item)).unwrap_or(false)
+        }
     }
 );
 
@@ -65,18 +168,25 @@ impl DocumentView {
         let find_bar = FindBar::new(mtm, &editor);
         let status = StatusPill::new(mtm);
         editor.set_status_pill(&status);
+        let toolbar = Toolbar::new(mtm, sel!(modeChanged:));
         let this = Self::alloc(mtm).set_ivars(Ivars {
             editor,
             scroll,
             find_bar,
             status,
             tops: OnceCell::new(),
-            observer: RefCell::default(),
+            observers: RefCell::default(),
+            toolbar,
+            mode: Cell::new(Mode::Edit),
+            web: OnceCell::new(),
+            html: RefCell::default(),
+            timer: RefCell::default(),
         });
         // SAFETY: NSView's designated initializer.
         let this: Retained<Self> = unsafe { msg_send![super(this), initWithFrame: frame] };
         let iv = this.ivars();
-        for v in [&*iv.scroll as &NSView, &iv.find_bar, &iv.status] {
+        iv.toolbar.set_target(&this);
+        for v in [&*iv.scroll as &NSView, &iv.find_bar, &iv.status, iv.toolbar.view()] {
             v.setTranslatesAutoresizingMaskIntoConstraints(false);
             this.addSubview(v);
         }
@@ -96,16 +206,142 @@ impl DocumentView {
             iv.scroll.bottomAnchor().constraintEqualToAnchor(&this.bottomAnchor()),
             iv.status.centerXAnchor().constraintEqualToAnchor(&this.centerXAnchor()),
             this.bottomAnchor().constraintEqualToAnchor_constant(&iv.status.bottomAnchor(), 56.0),
+            iv.toolbar.view().centerXAnchor().constraintEqualToAnchor(&this.centerXAnchor()),
+            this.bottomAnchor().constraintEqualToAnchor_constant(&iv.toolbar.view().bottomAnchor(), 12.0),
         ]));
         iv.scroll.setAutomaticallyAdjustsContentInsets(false);
         this.apply_insets();
         let weak = Weak::new(&*this);
-        *iv.observer.borrow_mut() = Some(observe(settings::CHANGED, None, move || {
+        let settings_changed = observe(settings::CHANGED, None, move || {
             if let Some(v) = weak.load() {
                 v.update_min_width();
+                if let Some(web) = v.ivars().web.get() {
+                    // SAFETY: a plain setter; zoom is 0.5...3.0.
+                    unsafe { web.setPageZoom(settings::zoom()) };
+                }
             }
-        }));
+        });
+        let weak = Weak::new(&*this);
+        let storage: &AnyObject = iv.editor.storage();
+        // SAFETY: a constant string.
+        let name = unsafe { NSTextStorageDidProcessEditingNotification }.to_string();
+        let text_changed = observe(&name, Some(storage), move || {
+            if let Some(v) = weak.load() {
+                v.text_changed();
+            }
+        });
+        *iv.observers.borrow_mut() = vec![settings_changed, text_changed];
         this
+    }
+
+    pub fn mode(&self) -> Mode {
+        self.ivars().mode.get()
+    }
+
+    /// Shows the editor or the preview (rendered now) and makes it first responder.
+    pub fn set_mode(&self, m: Mode) {
+        let iv = self.ivars();
+        iv.mode.set(m);
+        iv.toolbar.set_selected(m);
+        let preview = m == Mode::Preview;
+        if preview {
+            // Its Replace would edit the hidden text.
+            if !iv.find_bar.isHidden() {
+                iv.find_bar.hide();
+            }
+            self.render();
+        }
+        iv.scroll.setHidden(preview);
+        let web = iv.web.get();
+        if let Some(w) = web {
+            w.setHidden(!preview);
+        }
+        if let Some(win) = self.window() {
+            let first: &NSResponder = match web {
+                Some(w) if preview => w,
+                _ => &iv.editor,
+            };
+            win.makeFirstResponder(Some(first));
+        }
+    }
+
+    pub fn toolbar(&self) -> &Toolbar {
+        &self.ivars().toolbar
+    }
+
+    /// The last HTML handed to the web view (None before the first Preview).
+    pub fn preview_html(&self) -> Option<String> {
+        self.ivars().html.borrow().clone()
+    }
+
+    /// shortcut: a plain HTML fragment; Task 7 replaces this with PreviewView's page.
+    fn render(&self) {
+        let iv = self.ivars();
+        let html = crate::export::to_html(&iv.editor.string().to_string());
+        let web = iv.web.get_or_init(|| self.make_web());
+        // SAFETY: a nil base URL is allowed.
+        unsafe { web.loadHTMLString_baseURL(&NSString::from_str(&html), None) };
+        *iv.html.borrow_mut() = Some(html);
+    }
+
+    fn make_web(&self) -> Retained<WKWebView> {
+        let mtm = self.mtm();
+        // SAFETY: a fresh configuration; the frame is set by constraints.
+        let web = unsafe {
+            WKWebView::initWithFrame_configuration(mtm.alloc(), self.bounds(), &WKWebViewConfiguration::new(mtm))
+        };
+        web.setTranslatesAutoresizingMaskIntoConstraints(false);
+        // Under the find bar, status pill and toolbar.
+        self.addSubview_positioned_relativeTo(&web, NSWindowOrderingMode::Below, Some(&self.ivars().scroll));
+        NSLayoutConstraint::activateConstraints(&NSArray::from_retained_slice(&[
+            web.topAnchor().constraintEqualToAnchor(&self.topAnchor()),
+            web.bottomAnchor().constraintEqualToAnchor(&self.bottomAnchor()),
+            web.leadingAnchor().constraintEqualToAnchor(&self.leadingAnchor()),
+            web.trailingAnchor().constraintEqualToAnchor(&self.trailingAnchor()),
+        ]));
+        // SAFETY: a plain setter; zoom is 0.5...3.0.
+        unsafe { web.setPageZoom(settings::zoom()) };
+        web
+    }
+
+    /// The text storage changed: in Preview, re-render once RENDER_DELAY passes.
+    fn text_changed(&self) {
+        let iv = self.ivars();
+        if self.mode() != Mode::Preview || iv.timer.borrow().is_some() {
+            return;
+        }
+        // SAFETY: `renderPreview:` is a `-(void)x:(NSTimer *)t` method of this
+        // view; the timer retains the view until it fires.
+        let t = unsafe {
+            NSTimer::scheduledTimerWithTimeInterval_target_selector_userInfo_repeats(
+                RENDER_DELAY,
+                self,
+                sel!(renderPreview:),
+                None::<&AnyObject>,
+                false,
+            )
+        };
+        *iv.timer.borrow_mut() = Some(t);
+    }
+
+    /// The active mode's item is checked; undo and redo are off in Preview.
+    fn validate(&self, item: &NSMenuItem) -> bool {
+        let Some(action) = item.action() else { return true };
+        let preview = self.mode() == Mode::Preview;
+        if action == sel!(showPreview:) || action == sel!(showEditor:) {
+            let on = (action == sel!(showPreview:)) == preview;
+            item.setState(if on { NSControlStateValueOn } else { NSControlStateValueOff });
+        } else if action == sel!(undo:) || action == sel!(redo:) {
+            let Some(um) = self.undoManager().filter(|_| !preview) else { return false };
+            return if action == sel!(undo:) {
+                item.setTitle(&um.undoMenuItemTitle());
+                um.canUndo()
+            } else {
+                item.setTitle(&um.redoMenuItemTitle());
+                um.canRedo()
+            };
+        }
+        true
     }
 
     pub fn editor(&self) -> Retained<EditorView> {

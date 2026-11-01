@@ -125,16 +125,39 @@ fn find_item(menu: &NSMenu, want: &(String, NSEventModifierFlags)) -> Option<Ret
 /// `performKeyEquivalent` would send nil-targeted actions nowhere.)
 pub fn shortcut(win: &NSWindow, key: &str, mods: NSEventModifierFlags) {
     let app = NSApplication::sharedApplication(mtm());
-    let menu = app.mainMenu().expect("main menu");
-    let item = find_item(&menu, &normalise(key, mods))
-        .unwrap_or_else(|| panic!("no menu item bound to {key:?} {mods:?}"));
+    let item = menu_item(key, mods);
     let action = item.action().expect("item action");
-    if let Some(target) = item.target() {
-        // SAFETY: as below; an item with its own target ignores the chain.
-        let sent = unsafe { app.sendAction_to_from(action, Some(&target), Some(item.as_ref())) };
-        assert!(sent, "{target:?} did not handle {action:?}");
-        return;
+    let target = target(win, &item).unwrap_or_else(|| panic!("no responder for {action:?} ({key:?} {mods:?})"));
+    // SAFETY: menu actions are `-(void)x:(id)sender`; the sender is the item.
+    let sent = unsafe { app.sendAction_to_from(action, Some(&target), Some(item.as_ref())) };
+    assert!(sent, "{target:?} did not handle {action:?} for {key:?} {mods:?}");
+}
+
+/// Whether the menu item bound to `key` + `mods` would be enabled for `win`:
+/// some responder handles its action and that responder's validateMenuItem: agrees.
+pub fn enabled(win: &NSWindow, key: &str, mods: NSEventModifierFlags) -> bool {
+    let item = menu_item(key, mods);
+    let Some(target) = target(win, &item) else { return false };
+    if !target.class().responds_to(objc2::sel!(validateMenuItem:)) {
+        return true;
     }
+    // SAFETY: `-(BOOL)validateMenuItem:(NSMenuItem *)item`, which the target implements.
+    let ok: bool = unsafe { objc2::msg_send![&*target, validateMenuItem: &*item] };
+    ok
+}
+
+fn menu_item(key: &str, mods: NSEventModifierFlags) -> Retained<NSMenuItem> {
+    let menu = NSApplication::sharedApplication(mtm()).mainMenu().expect("main menu");
+    find_item(&menu, &normalise(key, mods)).unwrap_or_else(|| panic!("no menu item bound to {key:?} {mods:?}"))
+}
+
+/// The item's own target if it has one, else the first responder in the
+/// window's chain that implements its action, as a nil-targeted menu action would.
+fn target(win: &NSWindow, item: &NSMenuItem) -> Option<Retained<objc2::runtime::AnyObject>> {
+    if let Some(target) = item.target() {
+        return Some(target);
+    }
+    let action = item.action().expect("item action");
     // AppKit's explicit-target send does not walk the chain, so find the target here.
     let mut target = win.firstResponder();
     while let Some(r) = target.as_deref().filter(|r| !r.respondsToSelector(action)) {
@@ -142,17 +165,13 @@ pub fn shortcut(win: &NSWindow, key: &str, mods: NSEventModifierFlags) {
         target = unsafe { r.nextResponder() };
     }
     // After the chain, AppKit tries the window controller's document.
-    let target: Retained<objc2::runtime::AnyObject> = match target {
-        Some(r) => r.into(),
+    match target {
+        Some(r) => Some(r.into()),
         None => win
             .windowController()
             .and_then(|c| unsafe { c.document() }) // SAFETY: a plain getter.
-            .filter(|d| d.class().responds_to(action))
-            .unwrap_or_else(|| panic!("no responder for {action:?} ({key:?} {mods:?})")),
-    };
-    // SAFETY: menu actions are `-(void)x:(id)sender`; the sender is the item.
-    let sent = unsafe { app.sendAction_to_from(action, Some(&target), Some(item.as_ref())) };
-    assert!(sent, "nothing handled {action:?} for {key:?} {mods:?}");
+            .filter(|d| d.class().responds_to(action)),
+    }
 }
 
 /// Runs the main run loop for `secs` (timers, deferred work).
