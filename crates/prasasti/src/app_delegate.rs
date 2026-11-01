@@ -1,5 +1,5 @@
 use objc2::rc::Retained;
-use objc2::{MainThreadOnly, define_class, msg_send};
+use objc2::{MainThreadOnly, define_class, msg_send, sel};
 use objc2_app_kit::{NSApplication, NSApplicationActivationPolicy, NSApplicationDelegate};
 use objc2_foundation::{MainThreadMarker, NSNotification, NSObject, NSObjectProtocol};
 
@@ -17,8 +17,12 @@ define_class!(
             // Needed when run unbundled (`cargo run`); harmless in the .app.
             let app = NSApplication::sharedApplication(self.mtm());
             app.setActivationPolicy(NSApplicationActivationPolicy::Regular);
-            #[allow(deprecated)]
-            app.activateIgnoringOtherApps(true);
+            if app.respondsToSelector(sel!(activate)) {
+                app.activate(); // macOS 14+
+            } else {
+                #[allow(deprecated)]
+                app.activateIgnoringOtherApps(true);
+            }
         }
 
         #[unsafe(method(applicationSupportsSecureRestorableState:))]

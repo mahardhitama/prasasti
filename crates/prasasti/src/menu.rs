@@ -52,7 +52,10 @@ pub fn install(app: &NSApplication, mtm: MainThreadMarker) {
     let app_menu = menu(mtm, "Praśasti", &[
         s("About Praśasti", sel!(orderFrontStandardAboutPanel:), "", CMD),
         None,
+        None, // Services goes between these separators, below.
         s("Hide Praśasti", sel!(hide:), "h", CMD),
+        s("Hide Others", sel!(hideOtherApplications:), "h", OPT_CMD),
+        s("Show All", sel!(unhideAllApplications:), "", CMD),
         None,
         s("Quit Praśasti", sel!(terminate:), "q", CMD),
     ]);
@@ -75,12 +78,13 @@ pub fn install(app: &NSApplication, mtm: MainThreadMarker) {
         s("Cut", sel!(cut:), "x", CMD),
         s("Copy", sel!(copy:), "c", CMD),
         s("Paste", sel!(paste:), "v", CMD),
+        s("Paste and Match Style", sel!(pasteAsPlainText:), "V", OPT_CMD),
         s("Select All", sel!(selectAll:), "a", CMD),
         None,
         s("Copy as HTML", sel!(copyAsHTML:), "C", CMD),
         None,
     ]);
-    // Custom find bar (later task); not performFindPanelAction:.
+    // Our own find bar (FindBar), not AppKit's performFindPanelAction:.
     let find = menu(mtm, "Find", &[
         s("Find…", sel!(showFindBar:), "f", CMD),
         s("Find and Replace…", sel!(showFindReplaceBar:), "f", OPT_CMD),
@@ -119,6 +123,13 @@ pub fn install(app: &NSApplication, mtm: MainThreadMarker) {
         None,
         s("Bring All to Front", sel!(arrangeInFront:), "", CMD),
     ]);
+
+    // AppKit fills the Services submenu once it is registered.
+    let services = NSMenu::initWithTitle(NSMenu::alloc(mtm), &NSString::from_str("Services"));
+    let services_item = item(mtm, "Services", None, "");
+    services_item.setSubmenu(Some(&services));
+    app_menu.insertItem_atIndex(&services_item, 2);
+    app.setServicesMenu(Some(&services));
 
     for m in [&app_menu, &file, &edit, &format, &view, &window] {
         add_submenu(mtm, &main, m);

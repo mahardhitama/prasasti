@@ -284,20 +284,27 @@ fn keystroke_in_large_doc_restyles_locally() {
 const CMD: NSEventModifierFlags = NSEventModifierFlags::Command;
 const OPT_CMD: NSEventModifierFlags = NSEventModifierFlags::Option.union(CMD);
 
-/// Runs `f` with the general pasteboard holding `s`, restoring its string after.
+/// Runs `f` with the general pasteboard holding `s`, restoring every item
+/// and type it held before (the user's clipboard survives the test run).
 fn with_clipboard<T>(s: &str, f: impl FnOnce() -> T) -> T {
+    use objc2_app_kit::{NSPasteboardItem, NSPasteboardWriting};
     let pb = NSPasteboard::generalPasteboard();
-    let (string, html) = unsafe { (NSPasteboardTypeString, NSPasteboardTypeHTML) };
-    let saved = (pb.stringForType(string), pb.stringForType(html));
+    let saved: Vec<Vec<_>> = pb.pasteboardItems().map(|items| {
+        items.iter().map(|item| item.types().iter().filter_map(|t| Some((item.dataForType(&t)?, t))).collect()).collect()
+    }).unwrap_or_default();
     pb.clearContents();
-    pb.setString_forType(&NSString::from_str(s), string);
+    pb.setString_forType(&NSString::from_str(s), unsafe { NSPasteboardTypeString });
     let r = std::panic::catch_unwind(std::panic::AssertUnwindSafe(f));
     pb.clearContents();
-    if let Some(s) = saved.0 {
-        pb.setString_forType(&s, string);
-    }
-    if let Some(h) = saved.1 {
-        pb.setString_forType(&h, html);
+    let items: Vec<_> = saved.iter().map(|types| {
+        let item = NSPasteboardItem::new();
+        for (data, t) in types {
+            item.setData_forType(data, t);
+        }
+        objc2::runtime::ProtocolObject::<dyn NSPasteboardWriting>::from_retained(item)
+    }).collect();
+    if !items.is_empty() {
+        pb.writeObjects(&objc2_foundation::NSArray::from_retained_slice(&items));
     }
     r.unwrap_or_else(|e| std::panic::resume_unwind(e))
 }
@@ -367,6 +374,34 @@ fn paste_normalizes_crlf() {
     assert_eq!(text, "a\nb");
 }
 
+/// Paste and Match Style (⌥⇧⌘V) pastes plain text through our paste: LF endings.
+fn paste_and_match_style_normalizes_crlf() {
+    let text = with_clipboard("a\r\nb", || {
+        let (win, e) = ui::window_with("");
+        ui::shortcut(&win, "V", OPT_CMD);
+        let t = e.string().to_string();
+        win.close();
+        t
+    });
+    assert_eq!(text, "a\nb");
+}
+
+/// The app menu has the standard Services, Hide Others (⌥⌘H) and Show All.
+fn app_menu_has_standard_items() {
+    let (win, _) = ui::window_with("");
+    let app = NSApplication::sharedApplication(mtm());
+    let app_menu = app.mainMenu().unwrap().itemAtIndex(0).and_then(|i| i.submenu()).expect("app menu");
+    let by_action = |a: objc2::runtime::Sel| app_menu.itemArray().iter().find(|i| i.action() == Some(a));
+    let others = by_action(objc2::sel!(hideOtherApplications:)).expect("Hide Others");
+    assert_eq!(others.keyEquivalent().to_string(), "h");
+    assert_eq!(others.keyEquivalentModifierMask(), OPT_CMD);
+    assert!(by_action(objc2::sel!(unhideAllApplications:)).is_some(), "Show All");
+    assert!(app.servicesMenu().is_some(), "services menu registered");
+    let services = app_menu.itemWithTitle(ns_string!("Services")).and_then(|i| i.submenu());
+    assert!(services.is_some(), "Services in the app menu");
+    win.close();
+}
+
 fn copy_as_html_writes_both_types() {
     let (html, text, status) = with_clipboard("old", || {
         let (win, e) = ui::window_with("**b**");
@@ -383,11 +418,33 @@ fn copy_as_html_writes_both_types() {
     assert_eq!(status, "Copied as HTML.");
 }
 
+/// ⌘Z after a paste undoes the paste alone, not the typing before it.
+fn paste_undoes_alone() {
+    let text = with_clipboard("XY", || {
+        let (win, e) = ui::window_with("ab");
+        e.setSelectedRange(NSRange::new(2, 0));
+        ui::type_text(&win, "c");
+        ui::pump(0.05);
+        ui::shortcut(&win, "v", CMD);
+        ui::pump(0.05);
+        ui::type_text(&win, "d");
+        ui::pump(0.05);
+        assert_eq!(e.string().to_string(), "abcXYd");
+        ui::shortcut(&win, "z", CMD);
+        assert_eq!(e.string().to_string(), "abcXY", "undo removes the typing after the paste only");
+        ui::shortcut(&win, "z", CMD);
+        let t = e.string().to_string();
+        win.close();
+        t
+    });
+    assert_eq!(text, "abc", "undo removes the paste alone");
+}
+
 fn print_view(d: &PrasastiDocument) -> (Retained<objc2_app_kit::NSPrintOperation>, Retained<NSTextView>) {
     let doc: &NSDocument = d;
     // SAFETY: an empty dictionary is a valid settings dictionary.
     let op = unsafe { doc.printOperationWithSettings_error(&objc2_foundation::NSDictionary::new()) }.expect("operation");
-    let tv = op.view().expect("view").downcast::<NSTextView>().ok().expect("a text view");
+    let tv = op.view().expect("view").downcast::<NSTextView>().expect("a text view");
     (op, tv)
 }
 
@@ -404,7 +461,7 @@ fn print_operation_builds() {
     assert!(tv.frame().size.height > 20.0, "laid out to its full height");
     // SAFETY: plain getters; a null range pointer is allowed.
     let colour = unsafe { tv.textStorage().unwrap().attribute_atIndex_effectiveRange(objc2_app_kit::NSForegroundColorAttributeName, 0, std::ptr::null_mut()) };
-    let colour: Retained<objc2_app_kit::NSColor> = colour.expect("a colour").downcast().ok().expect("an NSColor");
+    let colour: Retained<objc2_app_kit::NSColor> = colour.expect("a colour").downcast().expect("an NSColor");
     let rgb = colour.colorUsingColorSpace(&objc2_app_kit::NSColorSpace::sRGBColorSpace()).expect("rgb");
     assert!(rgb.redComponent() < 0.01 && rgb.greenComponent() < 0.01 && rgb.blueComponent() < 0.01);
     assert_eq!(tv.backgroundColor(), objc2_app_kit::NSColor::whiteColor());
@@ -423,7 +480,7 @@ fn print_uses_editor_font_top_aligned() {
         let mut run = NSRange::new(0, 0);
         // SAFETY: NSFontAttributeName is AppKit's key; `at` is in bounds.
         let font = unsafe { storage.attribute_atIndex_effectiveRange(objc2_app_kit::NSFontAttributeName, at, &mut run) };
-        let font: Retained<NSFont> = font.expect("a font").downcast().ok().expect("an NSFont");
+        let font: Retained<NSFont> = font.expect("a font").downcast().expect("an NSFont");
         assert_eq!(font.familyName().map(|f| f.to_string()), Some(family.clone()), "at {at}");
         at = run.end().max(at + 1);
     }
@@ -432,6 +489,23 @@ fn print_uses_editor_font_top_aligned() {
     assert!(is_bold(&storage, s[..bold_at].encode_utf16().count()), "bold kept");
     assert!(!op.printInfo().isVerticallyCentered(), "top-aligned");
     assert!(!op.printInfo().isHorizontallyCentered());
+}
+
+/// A remote image that never answers delays print by seconds, not ~30 s.
+fn print_remote_image_times_out() {
+    // A local server that accepts and never answers.
+    let server = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+    let port = server.local_addr().unwrap().port();
+    std::thread::spawn(move || {
+        let held: Vec<_> = server.incoming().collect();
+        drop(held);
+    });
+    let d = doc_from(format!("before\n\n![x](http://127.0.0.1:{port}/x.png)\n\nafter\n").as_bytes());
+    let start = Instant::now();
+    let (_, tv) = print_view(&d);
+    let secs = start.elapsed().as_secs_f64();
+    assert!(tv.string().to_string().contains("after"));
+    assert!(secs < 10.0, "print took {secs:.1} s");
 }
 
 fn find_bar(e: &EditorView) -> Retained<FindBar> {
@@ -857,7 +931,8 @@ fn draft_names() -> std::collections::HashSet<std::ffi::OsString> {
 /// Removes the test documents' drafts created since `before` (never anyone else's).
 fn remove_new_drafts(before: &std::collections::HashSet<std::ffi::OsString>) {
     for name in draft_names().difference(before) {
-        if name.to_string_lossy().starts_with("doc.md (Autosaved ") {
+        let name_str = name.to_string_lossy();
+        if ["doc.md (Autosaved ", "a-b.md (Autosaved "].iter().any(|p| name_str.starts_with(p)) {
             let _ = std::fs::remove_file(drafts_dir().join(name));
         }
     }
@@ -1355,8 +1430,6 @@ fn buttons_in(v: &objc2_app_kit::NSView) -> Vec<Retained<NSButton>> {
     out
 }
 
-/// Through the real presenter path: a coordinated write from another thread
-/// reaches `presentedItemDidChange` on the presenter queue, then main.
 // ---- Runtime class names and typing around autosave ----
 
 /// The class the Objective-C runtime knows by `name`, if any.
@@ -1520,6 +1593,8 @@ fn recheck_after_keep_mine_stays_quiet() {
     });
 }
 
+/// Through the real presenter path: a coordinated write from another thread
+/// reaches `presentedItemDidChange` on the presenter queue, then main.
 fn presenter_reloads_clean_doc() {
     on_disk("presenter", "a\n", |fx| {
         // The document controller registers it as a file presenter, as in the app.
@@ -1551,13 +1626,13 @@ fn presenter_reloads_clean_doc() {
     });
 }
 
-/// As in the app: opened from its file and owned by the document controller.
-/// A held document must still write a recovery draft holding the local text.
-fn held_controller_doc_writes_draft() {
+/// Runs `f` on a document opened from `name` holding `initial`, as in the
+/// app: opened from its file and owned by the document controller. Sheets off; cleans up after.
+fn controller_doc(name: &str, initial: &[u8], f: impl FnOnce(&PrasastiDocument, &objc2_app_kit::NSWindow, &std::path::Path)) {
     let dir = std::env::temp_dir().join(format!("prasasti-held-ctl-{}-{}", std::process::id(), std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_nanos()));
     std::fs::create_dir_all(&dir).unwrap();
-    let path = dir.join("doc.md");
-    std::fs::write(&path, "a\r\nb").unwrap();
+    let path = dir.join(name);
+    std::fs::write(&path, initial).unwrap();
     let sheets = document::SHEETS_ENABLED.swap(false, std::sync::atomic::Ordering::SeqCst);
     let drafts_before = draft_names();
     let url = NSURL::fileURLWithPath(&NSString::from_str(path.to_str().unwrap()));
@@ -1570,28 +1645,126 @@ fn held_controller_doc_writes_draft() {
     dc.addDocument(&doc);
     doc.makeWindowControllers();
     let win = doc.windowControllers().firstObject().and_then(|c| c.window()).expect("window");
-    let r = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-        assert_eq!(doc.hold(), Some(HoldReason::LineEndings));
-        doc.editor().unwrap().setSelectedRange(NSRange::new(0, 0));
-        ui::type_text(&win, "mine ");
-        ui::pump(0.05);
-        let err = std::rc::Rc::new(std::cell::RefCell::new(None));
-        let e2 = err.clone();
-        let done = block2::RcBlock::new(move |e: *mut NSError| {
-            *e2.borrow_mut() = Some(unsafe { e.as_ref() }.map(|e| format!("{:?}", e.description())));
-        });
-        doc.autosaveWithImplicitCancellability_completionHandler(true, &done);
-        wait_until(|| err.borrow().is_some());
-        assert_eq!(err.borrow().clone().unwrap(), None, "draft write failed");
-        let draft: std::path::PathBuf = doc.autosavedContentsFileURL().and_then(|u| u.path()).expect("a recovery draft while held").to_string().into();
-        assert_eq!(std::fs::read_to_string(&draft).unwrap(), "mine a\nb");
-        assert_eq!(std::fs::read(&path).unwrap(), b"a\r\nb", "the original is untouched");
-    }));
+    doc.editor().unwrap().setSelectedRange(NSRange::new(0, 0));
+    let r = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| f(&doc, &win, &path)));
     doc.close();
     remove_new_drafts(&drafts_before);
     document::SHEETS_ENABLED.store(sheets, std::sync::atomic::Ordering::SeqCst);
     let _ = std::fs::remove_dir_all(&dir);
     r.unwrap_or_else(|e| std::panic::resume_unwind(e))
+}
+
+/// The completion error's description, once the handler has run (None = success).
+type Outcome = std::rc::Rc<std::cell::RefCell<Option<Option<String>>>>;
+
+fn completion() -> (Outcome, block2::RcBlock<dyn Fn(*mut NSError)>) {
+    let err = std::rc::Rc::new(std::cell::RefCell::new(None));
+    let e2 = err.clone();
+    let done = block2::RcBlock::new(move |e: *mut NSError| {
+        *e2.borrow_mut() = Some(unsafe { e.as_ref() }.map(|e| format!("{:?}", e.description())));
+    });
+    (err, done)
+}
+
+fn draft_text(doc: &PrasastiDocument) -> String {
+    let draft: std::path::PathBuf = doc.autosavedContentsFileURL().and_then(|u| u.path()).expect("a recovery draft").to_string().into();
+    std::fs::read_to_string(&draft).unwrap()
+}
+
+/// A held document must still write a recovery draft holding the local text.
+fn held_controller_doc_writes_draft() {
+    controller_doc("doc.md", b"a\r\nb", |doc, win, path| {
+        assert_eq!(doc.hold(), Some(HoldReason::LineEndings));
+        ui::type_text(win, "mine ");
+        ui::pump(0.05);
+        let (err, done) = completion();
+        doc.autosaveWithImplicitCancellability_completionHandler(true, &done);
+        wait_until(|| err.borrow().is_some());
+        assert_eq!(err.borrow().clone().unwrap(), None, "draft write failed");
+        assert_eq!(draft_text(doc), "mine a\nb");
+        assert_eq!(std::fs::read(path).unwrap(), b"a\r\nb", "the original is untouched");
+    });
+}
+
+/// AppKit itself asks for an autosave-elsewhere ("Ask to keep changes when
+/// closing documents", locked files); for a file-backed document it must
+/// write a draft too, not fail with 512.
+fn controller_doc_elsewhere_op_writes_draft() {
+    controller_doc("doc.md", b"a\r\nb", |doc, win, path| {
+        ui::type_text(win, "mine ");
+        ui::pump(0.05);
+        let (err, done) = completion();
+        let name = format!("doc.md (Autosaved {}).md", objc2_foundation::NSProcessInfo::processInfo().globallyUniqueString());
+        let dir = NSURL::fileURLWithPath(&NSString::from_str(drafts_dir().to_str().unwrap()));
+        let url = dir.URLByAppendingPathComponent(&NSString::from_str(&name)).unwrap();
+        doc.saveToURL_ofType_forSaveOperation_completionHandler(&url, ns_string!(MD), objc2_app_kit::NSSaveOperationType::AutosaveElsewhereOperation, &done);
+        wait_until(|| err.borrow().is_some());
+        assert_eq!(err.borrow().clone().unwrap(), None, "elsewhere save failed");
+        assert_eq!(draft_text(doc), "mine a\nb");
+        assert_eq!(std::fs::read(path).unwrap(), b"a\r\nb", "the original is untouched");
+    });
+}
+
+/// `a:b.md` shows as `a/b.md`; the draft name must still be one path component.
+fn draft_name_with_slash_is_written() {
+    controller_doc("a:b.md", b"a\r\nb", |doc, win, _| {
+        ui::type_text(win, "mine ");
+        ui::pump(0.05);
+        let (err, done) = completion();
+        doc.autosaveWithImplicitCancellability_completionHandler(true, &done);
+        wait_until(|| err.borrow().is_some());
+        assert_eq!(err.borrow().clone().unwrap(), None, "draft write failed");
+        let draft = doc.autosavedContentsFileURL().and_then(|u| u.path()).expect("a draft").to_string();
+        assert_eq!(std::path::Path::new(&draft).parent(), Some(drafts_dir().as_path()));
+        assert_eq!(draft_text(doc), "mine a\nb");
+    });
+}
+
+/// A failed save leaves no stale snapshot (⌘S would skip its disk check).
+fn failed_save_clears_snapshot() {
+    on_disk("failed-save", "a\n", |fx| {
+        fx.type_text("mine ");
+        let (err, done) = completion();
+        // A read-only folder: the data is produced, then the write fails.
+        let ro = fx.path.parent().unwrap().join("ro");
+        std::fs::create_dir(&ro).unwrap();
+        std::fs::set_permissions(&ro, std::os::unix::fs::PermissionsExt::from_mode(0o555)).unwrap();
+        let nowhere = NSURL::fileURLWithPath(&NSString::from_str(ro.join("x.md").to_str().unwrap()));
+        fx.doc.saveToURL_ofType_forSaveOperation_completionHandler(&nowhere, ns_string!(MD), objc2_app_kit::NSSaveOperationType::SaveToOperation, &done);
+        wait_until(|| err.borrow().is_some());
+        let failed = err.borrow().clone().unwrap().is_some();
+        std::fs::set_permissions(&ro, std::os::unix::fs::PermissionsExt::from_mode(0o755)).unwrap();
+        assert!(failed, "the save must fail");
+        assert!(!fx.doc.writing(), "no save in flight");
+    });
+}
+
+/// Duplicate leaves no stale snapshot either.
+fn duplicate_clears_snapshot() {
+    on_disk("dup-save", "a\n", |fx| {
+        fx.type_text("mine ");
+        let doc: &NSDocument = &fx.doc;
+        // The test bundle declares no document types, so opening the copy
+        // fails; the copy's data is written first, as in the app.
+        if let Ok(copy) = doc.duplicateAndReturnError() {
+            copy.close();
+        }
+        assert!(!fx.doc.writing(), "no save in flight");
+    });
+}
+
+/// The post-save re-check does nothing for a document closed meanwhile.
+fn recheck_skips_closed_document() {
+    on_disk("recheck-closed", "a\n", |fx| {
+        fx.type_text("b");
+        assert!(fx.autosave(true)); // schedules the re-check
+        fx.type_text("c");
+        fx.doc.close();
+        later();
+        fx.write("theirs\n");
+        ui::pump(1.3);
+        assert_eq!(fx.doc.hold(), None);
+    });
 }
 
 fn main() {
@@ -1627,8 +1800,11 @@ fn main() {
         ("link_from_clipboard", link_from_clipboard),
         ("paste_normalizes_crlf", paste_normalizes_crlf),
         ("copy_as_html_writes_both_types", copy_as_html_writes_both_types),
+        ("paste_and_match_style_normalizes_crlf", paste_and_match_style_normalizes_crlf),
+        ("app_menu_has_standard_items", app_menu_has_standard_items),
         ("print_operation_builds", print_operation_builds),
         ("print_uses_editor_font_top_aligned", print_uses_editor_font_top_aligned),
+        ("print_remote_image_times_out", print_remote_image_times_out),
         ("paints_matches", paints_matches),
         ("return_steps_matches", return_steps_matches),
         ("replace_all_one_undo", replace_all_one_undo),
@@ -1681,6 +1857,12 @@ fn main() {
         ("save_op_cancels_when_disk_changed", save_op_cancels_when_disk_changed),
         ("recheck_after_keep_mine_stays_quiet", recheck_after_keep_mine_stays_quiet),
         ("held_controller_doc_writes_draft", held_controller_doc_writes_draft),
+        ("controller_doc_elsewhere_op_writes_draft", controller_doc_elsewhere_op_writes_draft),
+        ("draft_name_with_slash_is_written", draft_name_with_slash_is_written),
+        ("failed_save_clears_snapshot", failed_save_clears_snapshot),
+        ("duplicate_clears_snapshot", duplicate_clears_snapshot),
+        ("recheck_skips_closed_document", recheck_skips_closed_document),
+        ("paste_undoes_alone", paste_undoes_alone),
     ];
     let mut failed = 0;
     for (name, f) in tests {

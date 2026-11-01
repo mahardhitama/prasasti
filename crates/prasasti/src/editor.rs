@@ -61,8 +61,8 @@ impl Drop for Observer {
 }
 
 define_class!(
-    /// The plain-text Markdown editor. Action stubs exist now so their menu
-    /// items validate; later tasks fill them in.
+    /// The plain-text Markdown editor: live styling, plus the Edit, Format
+    /// and View menu actions (formatting, paste, Copy as HTML, zoom).
     // SAFETY: NSTextView has no subclassing requirements we violate; no Drop.
     #[unsafe(super(NSTextView, NSText, NSView, NSResponder, NSObject))]
     #[thread_kind = MainThreadOnly]
@@ -219,8 +219,18 @@ define_class!(
                 return;
             };
             let Some(s) = guarded(|| normalize_newlines(&s.to_string())) else { return };
+            // Its own undo step: insertText would coalesce with the typing around it.
+            self.breakUndoCoalescing();
             // SAFETY: an NSString is a valid argument; NSNotFound means "the selection".
             unsafe { self.insertText_replacementRange(&NSString::from_str(&s), NSRange::new(NSNotFound as usize, 0)) };
+            self.breakUndoCoalescing();
+        }
+
+        /// Paste and Match Style: the editor is plain text already, so it is our paste.
+        #[unsafe(method(pasteAsPlainText:))]
+        fn paste_as_plain_text(&self, sender: Option<&AnyObject>) {
+            // SAFETY: our own `paste:` above, same signature.
+            let () = unsafe { msg_send![self, paste: sender] };
         }
 
         #[unsafe(method(copyAsHTML:))]

@@ -9,14 +9,14 @@ use objc2::AnyThread;
 use objc2::runtime::{AnyObject, Bool, Sel};
 use objc2::{DefinedClass, MainThreadOnly, Message, define_class, msg_send, sel};
 use objc2_app_kit::{
-    NSAlert, NSAlertFirstButtonReturn, NSFont, NSFontAttributeName, NSFontManager, NSAttributedStringAppKitDocumentFormats, NSColor, NSForegroundColorAttributeName, NSLayoutManager, NSPrintInfo, NSPrintOperation, NSTextContainer, NSTextStorage, NSTextView, NSAlertSecondButtonReturn, NSBackingStoreType, NSDocument,
+    NSAlert, NSAlertFirstButtonReturn, NSFont, NSFontAttributeName, NSFontManager, NSAttributedStringDocumentFormats, NSDocumentTypeDocumentOption, NSHTMLTextDocumentType, NSTimeoutDocumentOption, NSColor, NSForegroundColorAttributeName, NSLayoutManager, NSPrintInfo, NSPrintOperation, NSTextContainer, NSTextStorage, NSTextView, NSAlertSecondButtonReturn, NSBackingStoreType, NSDocument,
     NSDocumentChangeType, NSLayoutAttribute, NSModalResponse, NSSaveOperationType, NSStackView,
     NSUserInterfaceLayoutOrientation, NSView, NSWindow, NSWindowController, NSWindowStyleMask,
 };
 use objc2_foundation::{
     MainThreadMarker, NSArray, NSAttributedString, NSCocoaErrorDomain, NSCopying, NSData, NSDate, NSDictionary, NSError,
     NSFeatureUnsupportedError, NSFileReadInapplicableStringEncodingError, NSFileWriteUnknownError, NSLocalizedDescriptionKey, NSUserCancelledError,
-    NSFileManager, NSObjectProtocol, NSPoint, NSProcessInfo, NSRange, NSRect, NSSearchPathDirectory,
+    NSFileManager, NSNumber, NSObjectProtocol, NSPoint, NSProcessInfo, NSRange, NSRect, NSSearchPathDirectory,
     NSSearchPathDomainMask, NSSize, NSString, NSURL, NSURLContentModificationDateKey, ns_string,
 };
 use prasasti_core::file::{decode, normalize_newlines, saves_unchanged};
@@ -111,8 +111,7 @@ define_class!(
             // A change the presenter missed gets our sheet, not AppKit's
             // "changed by another application" alert; nothing is written.
             // While a write is in flight the disk is mid-change; the post-save re-check covers it.
-            let writing = self.ivars().pending.borrow().is_some();
-            if !writing && guarded(|| self.check_disk()).unwrap_or(false) {
+            if !self.writing() && guarded(|| self.check_disk()).unwrap_or(false) {
                 return;
             }
             if self.hold() == Some(HoldReason::Deleted) {
@@ -278,10 +277,24 @@ define_class!(
             guarded(|| self.disk_changed());
         }
 
-        // The post-save re-check: quiet while held (Keep Mine already answered).
+        // The post-save re-check: quiet while held (Keep Mine already answered),
+        // and for a document closed since the save.
         #[unsafe(method(prasastiRecheckDisk))]
         fn recheck_disk_on_main(&self) {
-            guarded(|| self.check_disk());
+            if self.windowControllers().count() > 0 {
+                guarded(|| self.check_disk());
+            }
+        }
+
+        // Duplicate writes the copy's data without our save completion; a
+        // snapshot left behind would read as a save in flight.
+        #[unsafe(method_id(duplicateAndReturnError:))]
+        fn duplicate(&self, error: *mut *mut NSError) -> Option<Retained<NSDocument>> {
+            let in_flight = self.ivars().pending.take();
+            // SAFETY: NSDocument's own implementation, same signature.
+            let copy = unsafe { msg_send![super(self), duplicateAndReturnError: error] };
+            *self.ivars().pending.borrow_mut() = in_flight;
+            copy
         }
 
         #[unsafe(method(prasastiDeleted))]
@@ -329,15 +342,23 @@ impl PrasastiDocument {
             return call_with_error(&handler, &cancelled_error());
         }
         // Backstop for any in-place autosave that does not go through `autosave`.
-        if op == NSSaveOperationType::AutosaveInPlaceOperation {
-            if let Some(reason) = self.hold() {
-                return call_with_error(&handler, &held_error(reason));
-            }
+        if op == NSSaveOperationType::AutosaveInPlaceOperation
+            && let Some(reason) = self.hold()
+        {
+            return call_with_error(&handler, &held_error(reason));
+        }
+        // AppKit's own autosave-elsewhere (close with "Ask to keep changes",
+        // locked files) fails with 512 for a file-backed document, as in `write_draft`.
+        if op == NSSaveOperationType::AutosaveElsewhereOperation && self.fileURL().is_some() {
+            return self.write_draft(move |err| handler.call((err,)));
         }
         let this = self.retain();
         let done = RcBlock::new(move |err: *mut NSError| {
             if err.is_null() {
                 guarded(|| this.saved(op));
+            } else {
+                // Nothing was written: the snapshot must not read as in flight.
+                this.ivars().pending.take();
             }
             handler.call((err,));
         });
@@ -373,6 +394,11 @@ impl PrasastiDocument {
     fn file_bytes(&self) -> Vec<u8> {
         let text = self.text().to_string();
         guarded(|| normalize_newlines(&text).into_bytes()).unwrap_or(text.into_bytes())
+    }
+
+    /// Whether a save is in flight (its data produced, its completion not yet run).
+    pub fn writing(&self) -> bool {
+        self.ivars().pending.borrow().is_some()
     }
 
     pub fn hold(&self) -> Option<HoldReason> {
@@ -485,8 +511,10 @@ impl PrasastiDocument {
         // opened from a file, AppKit first preserves a version of the (not yet
         // existing) draft and fails with 512, so no draft was ever written.
         // A fresh name each time keeps the previous draft intact until this one lands.
-        let Some(url) = self.new_draft_url() else { return done(ptr::null_mut()) };
-        let Some(path) = url.path().map(|p| p.to_string()) else { return done(ptr::null_mut()) };
+        let Some((url, path)) = self.new_draft_url().and_then(|u| Some((u.clone(), u.path()?.to_string()))) else {
+            let err = error_with("The recovery draft couldn't be written: no Autosave Information folder.");
+            return done(Retained::as_ptr(&err) as *mut NSError);
+        };
         if let Err(e) = std::fs::write(&path, self.file_bytes()) {
             let _ = std::fs::remove_file(&path);
             let err = error_with(&format!("The recovery draft couldn't be written: {e}"));
@@ -508,8 +536,9 @@ impl PrasastiDocument {
     fn new_draft_url(&self) -> Option<Retained<NSURL>> {
         let dir = drafts_dir_url(true)?;
         let unique = NSProcessInfo::processInfo().globallyUniqueString();
-        let name = format!("{} (Autosaved {unique}).md", self.displayName());
-        Some(dir.URLByAppendingPathComponent(&NSString::from_str(&name))?)
+        // One path component: `a:b.md` displays as `a/b.md`.
+        let name = format!("{} (Autosaved {unique}).md", self.displayName().to_string().replace(['/', ':'], "-"));
+        dir.URLByAppendingPathComponent(&NSString::from_str(&name))
     }
 
     /// Deletes the recovery drafts once the file holds the truth again.
@@ -654,8 +683,16 @@ impl PrasastiDocument {
 
         let html = crate::export::print_html(&self.text().to_string(), &crate::settings::font_family());
         let data = NSData::with_bytes(html.as_bytes());
-        // SAFETY: no document-attributes out-parameter.
-        let rendered = unsafe { NSAttributedString::initWithHTML_documentAttributes(NSAttributedString::alloc(), &data, None) }?;
+        // A remote image may not answer: give up on it after 5 s, not the default ~30 s.
+        // SAFETY: AppKit's option keys with values of their documented types; no attributes out-parameter.
+        let rendered = unsafe {
+            let options = NSDictionary::<NSString, AnyObject>::from_slices(
+                &[NSDocumentTypeDocumentOption, NSTimeoutDocumentOption],
+                &[NSHTMLTextDocumentType as &AnyObject, &*NSNumber::new_f64(5.0)],
+            );
+            NSAttributedString::initWithData_options_documentAttributes_error(NSAttributedString::alloc(), &data, &options, None)
+        }
+        .ok()?;
 
         let mtm = MainThreadMarker::from(self);
         let storage = NSTextStorage::new();
