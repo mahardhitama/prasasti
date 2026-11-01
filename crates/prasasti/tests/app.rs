@@ -1810,6 +1810,47 @@ fn register_bundled_fonts() {
     }
 }
 
+/// The checked-in kitchen-sink fixture is valid UTF-8/LF, has every section, its
+/// local images exist, and its assets stay small.
+fn kitchen_sink_is_well_formed() {
+    let dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../fixtures/kitchen-sink");
+    let bytes = std::fs::read(dir.join("kitchen-sink.md")).expect("fixture exists");
+    assert!(!bytes.contains(&b'\r'), "fixture must be LF only");
+    let text = String::from_utf8(bytes).expect("fixture is UTF-8");
+    for h in [
+        "Headings", "Paragraphs", "Links", "Lists", "Block quotes", "Code", "Tables", "Footnotes", "Math", "Mermaid",
+        "Images", "Raw HTML", "Non-ASCII",
+    ] {
+        assert!(text.lines().any(|l| l == format!("## {h}")), "missing h2 {h}");
+    }
+    let u16s: Vec<u16> = text.encode_utf16().collect();
+    let dests = prasasti_core::images::image_destinations(&u16s);
+    let mut local = 0;
+    for d in &dests {
+        let p = String::from_utf16(&d.path).unwrap();
+        if p.contains("://") || p.starts_with("data:") || p == "assets/missing.png" {
+            continue;
+        }
+        assert!(dir.join(&p).is_file(), "missing image {p}");
+        local += 1;
+    }
+    assert_eq!(local, 4, "four local images");
+    let (mut total, mut stack) = (0, vec![dir.join("assets")]);
+    while let Some(d) = stack.pop() {
+        for e in std::fs::read_dir(d).expect("assets dir") {
+            let e = e.unwrap();
+            if e.path().is_dir() {
+                stack.push(e.path());
+            } else {
+                let n = e.metadata().unwrap().len();
+                assert!(n < 100_000, "{:?} is {n} bytes", e.path());
+                total += n;
+            }
+        }
+    }
+    assert!(total < 500_000, "assets total {total} bytes");
+}
+
 fn main() {
     register_bundled_fonts();
     let app = NSApplication::sharedApplication(mtm());
@@ -1909,6 +1950,7 @@ fn main() {
         ("recheck_skips_closed_document", recheck_skips_closed_document),
         ("paste_undoes_alone", paste_undoes_alone),
         ("glass_and_webkit_available", glass_and_webkit_available),
+        ("kitchen_sink_is_well_formed", kitchen_sink_is_well_formed),
     ];
     let mut failed = 0;
     for (name, f) in tests {
