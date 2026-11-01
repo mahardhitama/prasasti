@@ -727,26 +727,33 @@ fn point_size(e: &EditorView) -> f64 {
 fn missing_font_falls_back() {
     let f = settings::editor_font("No Such Font 123", 1.0);
     let family = f.familyName().map(|s| s.to_string()).unwrap_or_default();
-    assert!(family == "IBM Plex Mono" || f.isFixedPitch(), "{family}");
-    assert_eq!(f.pointSize(), 13.0);
+    assert!(family == "JetBrains Mono" || f.isFixedPitch(), "{family}");
+    assert_eq!(f.pointSize(), 15.0);
+}
+
+fn default_font_is_jetbrains_mono_15() {
+    fresh_defaults();
+    let f = settings::current_font();
+    assert_eq!(f.familyName().map(|s| s.to_string()).as_deref(), Some("JetBrains Mono"));
+    assert_eq!(f.pointSize(), 15.0);
 }
 
 fn zoom_in_changes_point_size() {
     fresh_defaults();
     let (win, e) = ui::window_with("# hi **b**");
-    assert_eq!(point_size(&e), 13.0);
+    assert_eq!(point_size(&e), 15.0);
     ui::shortcut(&win, "=", CMD);
-    assert!((point_size(&e) - 13.0 * 1.1).abs() < 1e-9);
+    assert!((point_size(&e) - 15.0 * 1.1).abs() < 1e-9);
     assert_eq!(settings::zoom(), 1.1);
     // The storage is restyled too, not only the typing font.
     let f = attr(e.storage(), unsafe { objc2_app_kit::NSFontAttributeName }, 0).expect("font attr");
-    assert!((f.downcast::<NSFont>().unwrap().pointSize() - 13.0 * 1.1).abs() < 1e-9);
+    assert!((f.downcast::<NSFont>().unwrap().pointSize() - 15.0 * 1.1).abs() < 1e-9);
     ui::shortcut(&win, "+", CMD);
     assert_eq!(settings::zoom(), 1.25);
     ui::shortcut(&win, "-", CMD);
     assert_eq!(settings::zoom(), 1.1);
     ui::shortcut(&win, "0", CMD);
-    assert_eq!(point_size(&e), 13.0);
+    assert_eq!(point_size(&e), 15.0);
     assert_eq!(footer(&e).status(), "Text size 100%");
     // Zoom is a view setting: no undo step, text untouched.
     assert!(!e.undoManager().is_some_and(|u| u.canUndo()));
@@ -758,7 +765,7 @@ fn zoom_status_at_limit() {
     fresh_defaults();
     settings::set_zoom(3.0);
     let (win, e) = ui::window_with("x");
-    assert_eq!(point_size(&e), 39.0);
+    assert_eq!(point_size(&e), 45.0);
     ui::shortcut(&win, "=", CMD);
     assert_eq!(settings::zoom(), 3.0);
     assert_eq!(footer(&e).status(), "Text size 300%");
@@ -788,7 +795,7 @@ fn zoom_applies_to_every_window() {
         w3.close();
     }
     ui::shortcut(&w1, "-", CMD);
-    assert!((point_size(&e2) - 13.0 * 0.9).abs() < 1e-9);
+    assert!((point_size(&e2) - 15.0 * 0.9).abs() < 1e-9);
     assert_eq!(footer(&e1).status(), "Text size 90%");
     assert_eq!(footer(&e2).status(), "");
     w1.close();
@@ -830,7 +837,7 @@ fn change_font_stores_family() {
     }
     assert_eq!(settings::font_family(), "Menlo");
     assert_eq!(e.font().unwrap().familyName().unwrap().to_string(), "Menlo");
-    assert_eq!(point_size(&e), 13.0 * 1.5, "size comes from the zoom");
+    assert_eq!(point_size(&e), 15.0 * 1.5, "size comes from the zoom");
     panel.close();
     win.close();
 }
@@ -1785,7 +1792,26 @@ fn glass_and_webkit_available() {
     drop(web);
 }
 
+// The fonts are only installed inside the bundle; register them for this process.
+fn register_bundled_fonts() {
+    #[link(name = "CoreText", kind = "framework")]
+    unsafe extern "C" {
+        // `url` is a CFURLRef; NSURL is toll-free bridged to it.
+        fn CTFontManagerRegisterFontsForURL(url: *const AnyObject, scope: u32, error: *mut *const AnyObject) -> bool;
+    }
+    let dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../resources/fonts");
+    for entry in std::fs::read_dir(dir).expect("resources/fonts") {
+        let path = entry.expect("entry").path();
+        if path.extension().is_some_and(|e| e == "ttf") {
+            let url = NSURL::fileURLWithPath(&NSString::from_str(path.to_str().expect("utf-8 path")));
+            // SAFETY: a valid file URL; scope 1 is kCTFontManagerScopeProcess; the error out-pointer may be null.
+            assert!(unsafe { CTFontManagerRegisterFontsForURL(&*url as *const NSURL as *const AnyObject, 1, std::ptr::null_mut()) }, "{path:?}");
+        }
+    }
+}
+
 fn main() {
+    register_bundled_fonts();
     let app = NSApplication::sharedApplication(mtm());
     // Pin the light (Aqua) appearance before any window: colour assertions use
     // the light palette and must not depend on the system's Dark mode setting.
@@ -1834,6 +1860,7 @@ fn main() {
         ("undo_in_field_without_replace_stays_in_field", undo_in_field_without_replace_stays_in_field),
         ("replace_all_keeps_far_markers_hidden", replace_all_keeps_far_markers_hidden),
         ("missing_font_falls_back", missing_font_falls_back),
+        ("default_font_is_jetbrains_mono_15", default_font_is_jetbrains_mono_15),
         ("zoom_in_changes_point_size", zoom_in_changes_point_size),
         ("zoom_status_at_limit", zoom_status_at_limit),
         ("status_clears_after_3s", status_clears_after_3s),

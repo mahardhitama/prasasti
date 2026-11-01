@@ -43,7 +43,7 @@ Marks: ✅ pass, ❌ fail, **needs user** = a person has to check it.
 
 - ✅ **Print preview renders headings, bold and code.** Used ⌘P, then PDF > Save as
   PDF. The heading is large and bold, `bold` is bold, and code and the fence are
-  monospaced. The printed text uses the editor font (IBM Plex
+  monospaced. The printed text uses the editor font (JetBrains
   Mono by default; before, the HTML importer fell back to Times) and starts at
   the top of the page (before, it was vertically centred). Covered by the app
   test `print_uses_editor_font_top_aligned`.
@@ -77,7 +77,7 @@ Marks: ✅ pass, ❌ fail, **needs user** = a person has to check it.
 - ✅ **Footer in Dark mode.** Launched with `--args -AppleInterfaceStyle Dark`.
   The footer reads `3 Words  Auto-save paused: line endings` with the Font
   button, in light text on a dark bar, and is readable.
-- **needs user**: **monospaced fallback when Plex is missing.** It can't be
+- **needs user**: **monospaced fallback when JetBrains Mono is missing.** It can't be
   forced without uninstalling the font.
 - **needs user**: **typing feel with the find bar open on a 2 MB document.**
   Automated part: on a 1.97 MB document (340,000 words), the find bar opened
@@ -96,7 +96,7 @@ Marks: ✅ pass, ❌ fail, **needs user** = a person has to check it.
    `code`, a link), then switch System Settings > Appearance between Light and
    Dark. The background, text, markers, code panel and footer restyle at once
    (light bg `#ffffff`, dark bg `#101010`). Switch back afterwards.
-3. **Plex fallback.** On a Mac without IBM Plex Mono available (for example a
+3. **Plex fallback.** On a Mac without JetBrains Mono available (for example a
    build without `resources/fonts`), open a document: the editor uses a
    monospaced system font (Menlo or SF Mono), not a proportional one.
 4. **Typing feel, 2 MB with the find bar.** Generate the file with

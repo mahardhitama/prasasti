@@ -11,8 +11,8 @@ pub const CHANGED: &str = "PrasastiSettingsChanged";
 
 const FONT_KEY: &str = "editorFont";
 const ZOOM_KEY: &str = "textZoom";
-const DEFAULT_FAMILY: &str = "IBM Plex Mono";
-const BASE_SIZE: f64 = 13.0;
+pub const DEFAULT_FAMILY: &str = "JetBrains Mono";
+pub const BASE_SIZE: f64 = 15.0;
 
 thread_local! {
     static OVERRIDE: RefCell<Option<Retained<NSUserDefaults>>> = const { RefCell::new(None) };
@@ -56,8 +56,8 @@ fn notify() {
     unsafe { NSNotificationCenter::defaultCenter().postNotificationName_object(&NSString::from_str(CHANGED), None) };
 }
 
-/// `family` at 13pt × `zoom`; IBM Plex Mono if the family is missing, then
-/// the system monospaced font (Plex is only installed inside the bundle).
+/// `family` at 15pt × `zoom`; JetBrains Mono if the family is missing, then
+/// the system monospaced font (JetBrains Mono is only installed inside the bundle).
 pub fn editor_font(family: &str, zoom: f64) -> Retained<NSFont> {
     let size = BASE_SIZE * zoom;
     let mtm = MainThreadMarker::new().expect("fonts are resolved on the main thread");

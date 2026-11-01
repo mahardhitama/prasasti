@@ -715,7 +715,7 @@ impl PrasastiDocument {
         storage.setAttributedString(&rendered);
         // HTML leaves default-black runs without a colour, and the default text colour follows Dark Mode.
         black_where_unset(&storage);
-        // The importer can't see the bundled font (Plex prints as Times).
+        // The importer can't see the bundled font (JetBrains Mono prints as Times).
         editor_family(&storage, mtm);
         // Lay out to the full height now, so pagination sees the real length.
         layout.ensureLayoutForTextContainer(&container);
