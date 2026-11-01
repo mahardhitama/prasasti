@@ -467,6 +467,8 @@ mod tests {
     }
 
     #[test]
+    // A reversed (start > end) selection on purpose: it must clamp, not panic.
+    #[allow(clippy::reversed_empty_ranges)]
     fn out_of_range_selection_clamps() {
         let _ = toggle_emphasis(&u("abc"), 5..9, "**");
         let _ = insert_link(&u("abc"), 9..2, "https://x.org");

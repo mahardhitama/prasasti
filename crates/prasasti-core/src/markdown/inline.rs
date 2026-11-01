@@ -79,7 +79,7 @@ pub fn code_spans(text: &[u16]) -> Vec<Range> {
         }
         // Backslashes escape opening backticks in prose, but are literal once
         // inside code, including immediately before the closing backtick.
-        if backslashes_before(text, from) % 2 != 0 {
+        if !backslashes_before(text, from).is_multiple_of(2) {
             from += 1;
             continue;
         }
@@ -251,7 +251,7 @@ pub fn inline_markup(text: &[u16]) -> Vec<InlineMarkup> {
     let code = code_spans(text);
     let append = |markup: &mut Vec<InlineMarkup>, item: InlineMarkup| {
         let blocked = item.markers.iter().any(|m| {
-            backslashes_before(text, m.start) % 2 != 0 || code.iter().any(|c| m.start < c.end && c.start < m.end)
+            !backslashes_before(text, m.start).is_multiple_of(2) || code.iter().any(|c| m.start < c.end && c.start < m.end)
         });
         if !blocked {
             markup.push(item);

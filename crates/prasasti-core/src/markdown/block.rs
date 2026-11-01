@@ -144,7 +144,7 @@ fn inline_spans(t: &[u16], caret: Option<usize>, out: &mut Vec<StyleSpan>) {
 
     // Outer markup first, so what it encloses has the last word.
     let mut markup = inline_markup(t);
-    markup.sort_by(|a, b| b.content.len().cmp(&a.content.len()));
+    markup.sort_by_key(|m| std::cmp::Reverse(m.content.len()));
     for item in &markup {
         let kind = match item.kind {
             InlineKind::Bold => StyleKind::Bold,

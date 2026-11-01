@@ -28,7 +28,7 @@ mod tests {
 
     #[test]
     fn decode_refuses_invalid_utf8() {
-        assert_eq!(decode(&[0xff]).is_err(), true);
+        assert!(decode(&[0xff]).is_err());
         assert_eq!(decode("héllo".as_bytes()).unwrap(), "héllo");
     }
 
