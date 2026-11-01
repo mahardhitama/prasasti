@@ -15,8 +15,8 @@ use objc2_app_kit::{
 use objc2_foundation::{
     MainThreadMarker, NSArray, NSCocoaErrorDomain, NSCopying, NSData, NSDate, NSDictionary, NSError,
     NSFileReadInapplicableStringEncodingError, NSFileWriteUnknownError, NSLocalizedDescriptionKey,
-    NSObjectProtocol, NSPoint, NSRange, NSRect, NSSize, NSString, NSURL,
-    NSURLContentModificationDateKey, ns_string,
+    NSFileManager, NSObjectProtocol, NSPoint, NSProcessInfo, NSRange, NSRect, NSSearchPathDirectory,
+    NSSearchPathDomainMask, NSSize, NSString, NSURL, NSURLContentModificationDateKey, ns_string,
 };
 use prasasti_core::file::{decode, normalize_newlines, saves_unchanged};
 
@@ -96,6 +96,7 @@ define_class!(
             controller.setWindowFrameAutosaveName(ns_string!("PrasastiMain"));
             self.addWindowController(&controller);
             *self.ivars().editor.borrow_mut() = Some(editor);
+            self.set_hold(self.hold());
         }
 
         #[unsafe(method(readFromData:ofType:error:))]
@@ -116,7 +117,7 @@ define_class!(
                 return Bool::NO;
             };
             let ivars = self.ivars();
-            ivars.autosave_hold.set(hold);
+            self.set_hold(hold);
             *ivars.last_known.borrow_mut() = Some(raw);
             *ivars.text.borrow_mut() = NSString::from_str(&text);
             if let Some(editor) = &*ivars.editor.borrow() {
@@ -141,11 +142,20 @@ define_class!(
                 None => unsafe {
                     msg_send![super(self), autosaveWithImplicitCancellability: cancellable, completionHandler: handler]
                 },
-                // A timed autosave is simply skipped.
-                Some(_) if cancellable => handler.call((ptr::null_mut(),)),
-                // A forced one (close, quit) must fail: reporting success would
-                // let AppKit close the window and drop the text typed since the hold.
-                Some(reason) => call_with_error(handler, &held_error(reason)),
+                // The file itself is never written while held; a recovery draft
+                // is, so a crash or kill can't lose the text.
+                Some(reason) => {
+                    let handler = handler.copy();
+                    self.write_draft(move |draft_err| {
+                        if cancellable {
+                            handler.call((draft_err,));
+                        } else {
+                            // A forced one (close, quit) must fail even after the
+                            // draft: success would let AppKit close the window.
+                            call_with_error(&handler, &held_error(reason));
+                        }
+                    });
+                }
             }
         }
 
@@ -261,7 +271,7 @@ impl PrasastiDocument {
         if !self.isDocumentEdited() && self.reload() {
             return;
         }
-        self.ivars().autosave_hold.set(Some(HoldReason::ExternalChange));
+        self.set_hold(Some(HoldReason::ExternalChange));
         let this = self.retain();
         self.sheet(
             "The file changed on disk.",
@@ -294,7 +304,7 @@ impl PrasastiDocument {
         if self.hold() == Some(HoldReason::Deleted) {
             return;
         }
-        self.ivars().autosave_hold.set(Some(HoldReason::Deleted));
+        self.set_hold(Some(HoldReason::Deleted));
         let this = self.retain();
         self.sheet(
             "The file was deleted or moved to the Trash.",
@@ -304,10 +314,66 @@ impl PrasastiDocument {
                 if r == NSAlertFirstButtonReturn {
                     this.save_back();
                 } else if r == NSAlertSecondButtonReturn {
+                    this.forget_draft();
                     this.close();
                 }
             },
         );
+    }
+
+    fn set_hold(&self, hold: Option<HoldReason>) {
+        self.ivars().autosave_hold.set(hold);
+        let status = match hold {
+            None => "",
+            Some(HoldReason::LineEndings) => "Auto-save paused: line endings",
+            Some(HoldReason::ExternalChange) => "Auto-save paused: file changed on disk",
+            Some(HoldReason::Deleted) => "Auto-save paused: file deleted",
+        };
+        if let Some(footer) = self.editor().and_then(|e| e.footer()) {
+            footer.set_paused(status);
+        }
+    }
+
+    /// Writes the text to a recovery draft in ~/Library/Autosave Information
+    /// (AppKit's autosave-elsewhere), never to the file itself.
+    fn write_draft(&self, done: impl Fn(*mut NSError) + 'static) {
+        // A fresh name each time: rewriting the existing draft makes NSDocument
+        // refuse with "changed by another application" once the file changed.
+        let (Some(url), Some(kind)) = (self.new_draft_url(), self.fileType()) else {
+            return done(ptr::null_mut());
+        };
+        let previous = self.autosavedContentsFileURL().and_then(|u| u.path());
+        let done = RcBlock::new(move |err: *mut NSError| {
+            if err.is_null() {
+                if let Some(p) = &previous {
+                    let _ = std::fs::remove_file(p.to_string());
+                }
+            }
+            done(err);
+        });
+        self.saveToURL_ofType_forSaveOperation_completionHandler(&url, &kind, NSSaveOperationType::AutosaveElsewhereOperation, &done);
+    }
+
+    fn new_draft_url(&self) -> Option<Retained<NSURL>> {
+        let dir = NSFileManager::defaultManager()
+            .URLForDirectory_inDomain_appropriateForURL_create_error(
+                NSSearchPathDirectory::AutosavedInformationDirectory,
+                NSSearchPathDomainMask::UserDomainMask,
+                None,
+                true,
+            )
+            .ok()?;
+        let unique = NSProcessInfo::processInfo().globallyUniqueString();
+        let name = format!("{} (Autosaved {unique}).md", self.displayName());
+        Some(dir.URLByAppendingPathComponent(&NSString::from_str(&name))?)
+    }
+
+    /// Deletes the recovery draft once the file holds the truth again.
+    fn forget_draft(&self) {
+        if let Some(path) = self.autosavedContentsFileURL().and_then(|u| u.path()) {
+            let _ = std::fs::remove_file(path.to_string());
+        }
+        self.setAutosavedContentsFileURL(None);
     }
 
     /// Saves to the (deleted) file's own URL. `saveDocument:` would instead ask
@@ -335,6 +401,7 @@ impl PrasastiDocument {
             eprintln!("prasasti: reload failed: {}", e.localizedDescription());
             return false;
         }
+        self.forget_draft();
         if let (Some(editor), Some(r)) = (self.editor(), selection) {
             let len = editor.string().length();
             let start = r.location.min(len);
@@ -350,7 +417,7 @@ impl PrasastiDocument {
         use NSSaveOperationType as Op;
         let pending = self.ivars().pending.take();
         if matches!(op, Op::SaveOperation | Op::SaveAsOperation) {
-            self.ivars().autosave_hold.set(None);
+            self.set_hold(None);
         }
         let writes_file = matches!(op, Op::SaveOperation | Op::SaveAsOperation | Op::AutosaveInPlaceOperation | Op::AutosaveAsOperation);
         if writes_file && pending.is_some() {

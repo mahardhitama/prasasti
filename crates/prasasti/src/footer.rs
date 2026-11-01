@@ -22,6 +22,8 @@ pub struct Ivars {
     words: Cell<usize>,
     word_timer: RefCell<Option<Retained<NSTimer>>>,
     status_timer: RefCell<Option<Retained<NSTimer>>>,
+    /// A status that stays until replaced (autosave paused); 3 s messages show over it.
+    paused: RefCell<String>,
 }
 
 define_class!(
@@ -46,7 +48,8 @@ define_class!(
 
         #[unsafe(method(clearStatus:))]
         fn clear_status(&self, _timer: &NSTimer) {
-            self.ivars().status_label.setStringValue(&NSString::new());
+            self.ivars().status_timer.borrow_mut().take();
+            self.ivars().status_label.setStringValue(&NSString::from_str(&self.ivars().paused.borrow()));
         }
     }
 );
@@ -62,6 +65,7 @@ impl Footer {
             words: Cell::new(0),
             word_timer: RefCell::default(),
             status_timer: RefCell::default(),
+            paused: RefCell::default(),
         });
         // SAFETY: NSView's designated initializer.
         let this: Retained<Self> = unsafe { msg_send![super(this), initWithFrame: NSRect::ZERO] };
@@ -103,6 +107,14 @@ impl Footer {
     pub fn set_status(&self, s: &str) {
         self.ivars().status_label.setStringValue(&NSString::from_str(s));
         self.restart(&self.ivars().status_timer, STATUS_SECS, sel!(clearStatus:));
+    }
+
+    /// Shows `s` until the next call ("" clears it); a 3 s message shows over it.
+    pub fn set_paused(&self, s: &str) {
+        *self.ivars().paused.borrow_mut() = s.to_string();
+        if self.ivars().status_timer.borrow().is_none() {
+            self.ivars().status_label.setStringValue(&NSString::from_str(s));
+        }
     }
 
     pub fn words(&self) -> usize {

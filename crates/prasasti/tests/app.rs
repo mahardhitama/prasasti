@@ -724,6 +724,13 @@ impl OnDisk {
     fn text(&self) -> String {
         self.doc.text().to_string()
     }
+    /// The recovery draft AppKit restores after a crash, if one was written.
+    fn draft(&self) -> Option<std::path::PathBuf> {
+        Some(self.doc.autosavedContentsFileURL()?.path()?.to_string().into())
+    }
+    fn status(&self) -> String {
+        self.doc.editor().unwrap().footer().unwrap().status()
+    }
     /// Types through the window and lets the run loop close the undo group.
     fn type_text(&self, s: &str) {
         ui::type_text(&self.win, s);
@@ -791,6 +798,9 @@ fn on_disk(name: &str, initial: &str, f: impl FnOnce(&OnDisk)) {
     doc.editor().unwrap().setSelectedRange(NSRange::new(0, 0));
     let fx = OnDisk { doc, win, path };
     let r = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| f(&fx)));
+    if let Some(draft) = fx.draft() {
+        let _ = std::fs::remove_file(draft);
+    }
     fx.doc.close();
     document::SHEETS_ENABLED.store(sheets, std::sync::atomic::Ordering::SeqCst);
     let _ = std::fs::remove_dir_all(&dir);
@@ -835,6 +845,7 @@ fn edited_doc_holds() {
         fx.write("theirs\n");
         fx.doc.disk_changed();
         assert_eq!(fx.doc.hold(), Some(HoldReason::ExternalChange));
+        assert_eq!(fx.status(), "Auto-save paused: file changed on disk");
         assert_eq!(fx.text(), "mine a\n", "local text kept");
         assert!(fx.doc.isDocumentEdited());
     });
@@ -848,9 +859,18 @@ fn autosave_skipped_while_held() {
         fx.doc.disk_changed();
         assert!(fx.autosave(true), "an implicit autosave reports success");
         assert_eq!(fx.disk(), "theirs\n");
+        let draft = fx.draft().expect("a recovery draft while held");
+        assert!(draft.to_string_lossy().contains("/Autosave Information/"), "{draft:?}");
+        assert_eq!(std::fs::read_to_string(&draft).unwrap(), "mine a\n");
         // A forced autosave (closing, quitting) must fail so the window stays.
+        fx.type_text("more ");
         assert!(!fx.autosave(false), "a forced autosave reports the hold");
         assert_eq!(fx.disk(), "theirs\n");
+        let newer = fx.draft().expect("draft");
+        assert_eq!(std::fs::read_to_string(&newer).unwrap(), "mine more a\n", "drafted first");
+        if newer != draft {
+            assert!(!draft.exists(), "the older draft is removed");
+        }
         assert!(fx.doc.isDocumentEdited());
     });
 }
@@ -877,9 +897,13 @@ fn keep_mine_then_save_overwrites() {
         assert!(fx.doc.isDocumentEdited());
         assert!(fx.autosave(true));
         assert_eq!(fx.disk(), "theirs\n", "autosave still held");
+        let draft = fx.draft().expect("draft");
         fx.save();
         assert_eq!(fx.disk(), "mine a\n");
         assert_eq!(fx.doc.hold(), None);
+        assert_eq!(fx.draft(), None, "Save forgets the draft");
+        assert!(!draft.exists(), "Save deletes the draft");
+        assert_eq!(fx.status(), "", "paused status clears with the hold");
     });
 }
 
@@ -889,9 +913,14 @@ fn reload_discards() {
         later();
         fx.write("theirs\n");
         fx.doc.disk_changed();
+        assert!(fx.autosave(true));
+        let draft = fx.draft().expect("draft");
         fx.doc.resolve_external(true);
         assert_eq!(fx.text(), "theirs\n");
         assert_eq!(fx.doc.hold(), None);
+        assert_eq!(fx.status(), "");
+        assert_eq!(fx.draft(), None, "Reload forgets the draft");
+        assert!(!draft.exists(), "Reload deletes the draft");
         assert!(!fx.doc.isDocumentEdited());
     });
 }
@@ -902,8 +931,10 @@ fn deleted_file_holds() {
         std::fs::remove_file(&fx.path).unwrap();
         fx.doc.disk_changed();
         assert_eq!(fx.doc.hold(), Some(HoldReason::Deleted));
+        assert_eq!(fx.status(), "Auto-save paused: file deleted");
         assert!(fx.autosave(true));
         assert!(!fx.path.exists(), "autosave does not recreate the file");
+        assert_eq!(std::fs::read_to_string(fx.draft().expect("draft")).unwrap(), "mine a\n");
         assert_eq!(fx.text(), "mine a\n");
     });
 }
@@ -930,6 +961,8 @@ fn close_while_held_keeps_document() {
         later();
         fx.write("theirs\n");
         fx.doc.disk_changed();
+        // A draft written first must not make AppKit think nothing is left to save.
+        assert!(fx.autosave(true));
         let probe: Retained<CloseProbe> = unsafe { objc2::msg_send![super(CloseProbe::alloc().set_ivars(Default::default())), init] };
         // SAFETY: the selector matches CloseProbe's method; no context.
         unsafe {
@@ -994,12 +1027,23 @@ fn removed_file_returns_changed() {
 fn crlf_hold_blocks_autosave_until_save() {
     on_disk("crlf", "a\r\nb", |fx| {
         assert_eq!(fx.doc.hold(), Some(HoldReason::LineEndings));
+        assert_eq!(fx.status(), "Auto-save paused: line endings");
         fx.type_text("x");
         assert!(fx.autosave(true));
         assert_eq!(fx.disk(), "a\r\nb", "autosave never writes over CRs");
         fx.save();
         assert_eq!(fx.disk(), "xa\nb");
         assert_eq!(fx.doc.hold(), None);
+        assert_eq!(fx.status(), "");
+    });
+}
+
+fn paused_status_outlives_transient_status() {
+    on_disk("status", "a\r\n", |fx| {
+        let editor = fx.doc.editor().unwrap();
+        editor.footer().unwrap().set_status("Text size 110%");
+        ui::pump(3.3);
+        assert_eq!(fx.status(), "Auto-save paused: line endings", "back after the 3 s message, and stays");
     });
 }
 
@@ -1149,6 +1193,7 @@ fn main() {
         ("deleted_file_holds", deleted_file_holds),
         ("removed_file_returns_changed", removed_file_returns_changed),
         ("crlf_hold_blocks_autosave_until_save", crlf_hold_blocks_autosave_until_save),
+        ("paused_status_outlives_transient_status", paused_status_outlives_transient_status),
         ("rename_follows_file", rename_follows_file),
         ("close_while_held_keeps_document", close_while_held_keeps_document),
         ("sheet_keep_mine_button", sheet_keep_mine_button),
