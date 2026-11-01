@@ -1,5 +1,5 @@
 //! The document window's content view: the editor's scroll view fills the
-//! window (under the transparent titlebar), the find bar sits below the
+//! window (under the opaque unified-toolbar titlebar), the find bar sits below the
 //! titlebar, and the status pill floats near the bottom, above the toolbar.
 //! It also owns the window's mode: Edit shows the editor, Preview hides it
 //! (it stays in the window, the only source of truth) and shows a web view.

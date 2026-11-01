@@ -12,7 +12,7 @@ use objc2::rc::{Retained, Weak};
 use objc2::runtime::{AnyObject, ProtocolObject};
 use objc2::{AnyThread, DefinedClass, MainThreadOnly, define_class, msg_send, sel};
 use objc2_app_kit::{
-    NSEvent, NSEventModifierFlags, NSMenuItem, NSPasteboard, NSPasteboardTypeString, NSResponder, NSView, NSWorkspace,
+    NSBeep, NSEvent, NSEventModifierFlags, NSMenuItem, NSPasteboard, NSPasteboardTypeString, NSResponder, NSView, NSWorkspace,
 };
 use objc2_foundation::{
     MainThreadMarker, NSArray, NSBundle, NSData, NSDate, NSDictionary, NSError, NSHTTPURLResponse, NSObject,
@@ -551,14 +551,17 @@ impl PreviewView {
 const LAUNCHERS: &[&str] = &[
     "app", "command", "sh", "bash", "zsh", "csh", "ksh", "tool", "terminal", "workflow", "action", "pkg", "mpkg",
     "dmg", "scpt", "scptd", "applescript", "jar", "webloc", "inetloc", "fileloc", "url", "prefpane", "saver",
-    "qlgenerator", "kext", "mobileconfig", "py", "rb", "pl", "osax", "plugin", "bundle", "framework",
+    "qlgenerator", "kext", "mobileconfig", "py", "rb", "pl", "osax", "plugin", "bundle", "framework", "shortcut", "iso",
+    "jnlp", "dylib", "ps1",
 ];
 
 /// Whether a linked file may be opened in its app: a regular file, not
 /// executable, not a launcher type. Anything else is only shown in Finder.
+/// Judged on the symlink-resolved path, since that is what gets opened.
 fn opens_directly(p: &Path) -> bool {
     use std::os::unix::fs::PermissionsExt;
-    let Ok(meta) = std::fs::metadata(p) else { return false };
+    let Ok(p) = std::fs::canonicalize(p) else { return false };
+    let Ok(meta) = std::fs::metadata(&p) else { return false };
     let ext = p.extension().and_then(|e| e.to_str()).unwrap_or_default().to_ascii_lowercase();
     meta.is_file() && meta.permissions().mode() & 0o111 == 0 && !LAUNCHERS.contains(&ext.as_str())
 }
@@ -578,7 +581,11 @@ fn open_outside(url: &str) {
     let Some(path) = decode(rest.split(['?', '#']).next().unwrap_or_default()) else { return };
     let mut abs = OsString::from("/");
     abs.push(path);
-    let path = PathBuf::from(abs);
+    // Resolve symlinks first: `notes.md -> x.terminal` must be judged (and opened) as `x.terminal`.
+    let Ok(path) = std::fs::canonicalize(PathBuf::from(abs)) else {
+        NSBeep();
+        return;
+    };
     let Some(u) = path.to_str().map(|p| NSURL::fileURLWithPath(&NSString::from_str(p))) else { return };
     if opens_directly(&path) {
         ws.openURL(&u);
@@ -670,6 +677,13 @@ mod tests {
         assert!(!opens_directly(&dir.join("A.app")));
         assert!(!opens_directly(&dir), "directory");
         assert!(!opens_directly(&dir.join("missing.png")));
+        let target = file("x.terminal", 0o644);
+        let link = dir.join("notes2.md");
+        std::os::unix::fs::symlink(&target, &link).unwrap();
+        assert!(!opens_directly(&link), "symlink to a launcher");
+        let link = dir.join("a-link.png");
+        std::os::unix::fs::symlink(dir.join("a.png"), &link).unwrap();
+        assert!(opens_directly(&link), "symlink to a plain file");
         let _ = std::fs::remove_dir_all(&dir);
     }
 

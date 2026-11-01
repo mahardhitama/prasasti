@@ -6,8 +6,11 @@ use std::cell::RefCell;
 use objc2::rc::Retained;
 use objc2::runtime::AnyObject;
 use objc2::{DefinedClass, MainThreadOnly, define_class, msg_send, sel};
-use objc2_app_kit::{NSGlassEffectView, NSResponder, NSTextField, NSView};
-use objc2_foundation::{MainThreadMarker, NSObject, NSObjectProtocol, NSRect, NSString, NSTimer};
+use objc2_app_kit::{
+    NSAccessibilityAnnouncementKey, NSAccessibilityAnnouncementRequestedNotification, NSAccessibilityPostNotificationWithUserInfo,
+    NSAccessibilityPriorityKey, NSAccessibilityPriorityLevel, NSGlassEffectView, NSResponder, NSTextField, NSView,
+};
+use objc2_foundation::{MainThreadMarker, NSDictionary, NSNumber, NSObject, NSObjectProtocol, NSRect, NSString, NSTimer};
 
 use crate::util::guarded;
 
@@ -70,11 +73,15 @@ impl StatusPill {
         if self.ivars().timer.borrow().is_none() {
             self.show(text);
         }
+        if let Some(t) = text {
+            self.announce(t);
+        }
     }
 
     /// Shows `text` for 2 s, then the paused text or nothing.
     pub fn flash(&self, text: &str) {
         self.show(Some(text));
+        self.announce(text);
         if let Some(t) = self.ivars().timer.borrow_mut().take() {
             t.invalidate();
         }
@@ -104,5 +111,18 @@ impl StatusPill {
     fn show(&self, text: Option<&str>) {
         self.ivars().label.setStringValue(&NSString::from_str(text.unwrap_or("")));
         self.setHidden(text.is_none());
+    }
+
+    /// Tells VoiceOver; "Auto-save paused" is data-safety news.
+    fn announce(&self, text: &str) {
+        let (text, priority) = (NSString::from_str(text), NSNumber::new_isize(NSAccessibilityPriorityLevel::High.0));
+        // SAFETY: the keys are AppKit's constants; the values are an NSString and an NSNumber, as documented.
+        unsafe {
+            let info = NSDictionary::from_slices(
+                &[NSAccessibilityAnnouncementKey, NSAccessibilityPriorityKey],
+                &[&*text as &AnyObject, &*priority as &AnyObject],
+            );
+            NSAccessibilityPostNotificationWithUserInfo(self, NSAccessibilityAnnouncementRequestedNotification, Some(&info));
+        }
     }
 }

@@ -12,7 +12,7 @@ use objc2::{AnyThread, sel};
 use objc2_app_kit::{
     NSAccessibility, NSAccessibilityRadioButtonRole, NSAnimatablePropertyContainer, NSAppearanceCustomization, NSAnimationContext, NSAppearanceNameAqua, NSAppearanceNameDarkAqua,
     NSButton, NSColor, NSFont, NSFontAttributeName, NSFontWeightBold, NSFontWeightMedium, NSForegroundColorAttributeName,
-    NSGlassEffectContainerView, NSGlassEffectViewStyle, NSView,
+    NSGlassEffectContainerView, NSGlassEffectViewStyle, NSView, NSWindowOcclusionState,
 };
 use objc2_foundation::{MainThreadMarker, NSArray, NSAttributedString, NSDictionary, NSPoint, NSRect, NSSize, NSString};
 
@@ -103,12 +103,13 @@ impl Toolbar {
         self.selected.get()
     }
 
-    /// Moves the thumb (sliding while the window is on screen) and restyles the labels.
+    /// Moves the thumb (sliding while the window is actually drawn) and restyles the labels.
     /// Never sends an action.
     pub fn set_selected(&self, m: Mode) {
         self.selected.set(m);
         let frame = slot(index(m));
-        if self.root.window().is_some_and(|w| w.isVisible()) {
+        // Occluded, locked or asleep: Core Animation doesn't advance, so the thumb would stay put.
+        if self.root.window().is_some_and(|w| w.isVisible() && w.occlusionState().contains(NSWindowOcclusionState::Visible)) {
             let thumb = self.thumb.clone();
             NSAnimationContext::runAnimationGroup(&RcBlock::new(move |ctx: NonNull<NSAnimationContext>| {
                 guarded(|| {

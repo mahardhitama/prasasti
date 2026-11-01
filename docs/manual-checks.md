@@ -232,7 +232,7 @@ locked). `cargo clippy --workspace --all-targets` has no errors.
    `code`, a link), then switch System Settings > Appearance between Light and
    Dark. The background, text, markers, code panel and status pill restyle at once
    (Catppuccin Latte bg `#eff1f5`, Mocha bg `#1e1e2e`). Switch back afterwards.
-3. **Plex fallback.** On a Mac without JetBrains Mono available (for example a
+3. **Monospace fallback.** On a Mac without JetBrains Mono available (for example a
    build without `resources/fonts`), open a document: the editor uses a
    monospaced system font (Menlo or SF Mono), not a proportional one.
 4. **Typing feel, 2 MB with the find bar.** Generate the file with
