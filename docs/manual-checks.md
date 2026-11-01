@@ -19,29 +19,34 @@ Marks: ✅ pass, ❌ fail, **needs user** = a person has to check it.
   and its text. Delete quits and removes the draft. Nothing is lost silently, so
   the `applicationShouldTerminate:` fix (brief Step 2.3) was not needed. After a
   normal quit, no windows are restored on the next launch.
-- ❌ **kill -9 while held (CRLF).** Opened a CRLF file; the footer read
-  `Auto-save paused: line endings`. Typed in three rounds 25 s apart, and no
-  recovery draft ever appeared in `~/Library/Autosave Information`. After
-  `kill -9` and a relaunch, the hold and the edited mark came back, but the text
-  had reverted to the file's (`round1 round2 round3` lost). The CRLF file stayed
-  byte-identical. Cause: the draft write (`AutosaveElsewhereOperation` to
-  `<name> (Autosaved <id>).md`) fails in the bundled app with NSCocoaErrorDomain
-  512, "couldn't be saved in the folder Autosave Information". The same thing
-  happens for an external-change hold. The app tests pass because their
-  documents never go through `NSDocumentController`.
-- ✅ **⌘Q while held.** After the untitled prompt, the held document shows the
-  alert "Auto-save is paused because saving would change the file's line
-  endings. Choose File > Save to keep your changes." with an OK button. The quit
-  is cancelled and the text stays in the window. Because of the bug above, no
-  draft is written, so a forced quit at that point would lose the text.
+- ✅ **kill -9 while held (CRLF).** `crlf.md` = `# CRLF\r\nline two\r\n`.
+  Typed `abc`; the footer read `Auto-save paused: line endings`. The draft
+  `crlf.md (Autosaved …).md` appeared about 15 s later holding
+  `# CRLF\nline two\nabc`. After `kill -9` and a relaunch with no arguments, the
+  window came back with that text and the hold, and the CRLF file was
+  byte-identical. (Earlier the draft write failed with
+  NSCocoaErrorDomain 512 and the typed text was lost.)
+- ✅ **kill -9 while held (external change).** `ext.md` = `# Ext\n`.
+  Typed `abc`, wrote `external\n` from outside, chose Keep Mine (footer
+  `Auto-save paused: file changed on disk`), typed `def`. The draft held
+  `# Ext\nabcdef`. After `kill -9` and a relaunch the window came back with that
+  text and the hold; the file still read `external\n`.
+- ✅ **⌘Q while held.** Opened the CRLF file above, typed `abc`; drafts
+  holding `# CRLF\nline two\nabc` were already present within 1 s of checking.
+  ⌘Q (sent after a frontmost check) showed the sheet "Auto-save is paused because
+  saving would change the file's line endings. Choose File > Save to keep your
+  changes." with OK. The app kept running (checked 3 s later and again after
+  ~30 s, when the draft had rotated), the CRLF file was byte-identical, and the
+  latest draft still held `abc`. Nothing was lost.
 
 ## Checklist
 
 - ✅ **Print preview renders headings, bold and code.** Used ⌘P, then PDF > Save as
   PDF. The heading is large and bold, `bold` is bold, and code and the fence are
-  monospaced. Two oddities: with the default IBM Plex Mono, the printed body is
-  in Times (the HTML importer can't find the bundled Plex), and the text sits
-  vertically centred on the page.
+  monospaced. The printed text uses the editor font (IBM Plex
+  Mono by default; before, the HTML importer fell back to Times) and starts at
+  the top of the page (before, it was vertically centred). Covered by the app
+  test `print_uses_editor_font_top_aligned`.
 - ✅ **⌘T opens the Fonts panel, and picking a font changes every window.**
   Choosing Andale Mono changed both open tabs (read with the AX `AXFont`
   attribute) and wrote `editorFont`.
