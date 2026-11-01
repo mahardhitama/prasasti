@@ -67,8 +67,6 @@ pub struct Ivars {
     read_from_disk: Cell<bool>,
     /// Where pasted images of this document go until it is saved.
     paste_dir: RefCell<Option<PathBuf>>,
-    /// Saves waiting one run-loop turn after an image rebase (`prasastiContinueSaves`).
-    deferred_saves: RefCell<Vec<Box<dyn FnOnce()>>>,
 }
 
 impl Ivars {
@@ -86,7 +84,6 @@ impl Ivars {
             titlebar: RefCell::new(None),
             read_from_disk: Cell::new(false),
             paste_dir: RefCell::new(None),
-            deferred_saves: RefCell::new(Vec::new()),
         }
     }
 }
@@ -355,14 +352,6 @@ define_class!(
             copy
         }
 
-        #[unsafe(method(prasastiContinueSaves))]
-        fn continue_saves(&self) {
-            let saves = self.ivars().deferred_saves.take();
-            for save in saves {
-                guarded(save);
-            }
-        }
-
         #[unsafe(method(prasastiDeleted))]
         fn deleted_on_main(&self) {
             guarded(|| self.deleted());
@@ -422,11 +411,13 @@ impl PrasastiDocument {
         let rebased = matches!(op, NSSaveOperationType::SaveOperation | NSSaveOperationType::SaveAsOperation)
             .then(|| guarded(|| self.rebase_images(url)).flatten())
             .flatten();
-        let defer = rebased.is_some();
         let this = self.retain();
         let done = RcBlock::new(move |err: *mut NSError| {
             if err.is_null() {
                 guarded(|| this.saved(op));
+                if rebased.is_some() {
+                    guarded(|| this.clean_after_rebase());
+                }
             } else {
                 // Nothing was written: the snapshot must not read as in flight.
                 this.ivars().pending.take();
@@ -436,20 +427,7 @@ impl PrasastiDocument {
             }
             handler.call((err,));
         });
-        if !defer {
-            return unsafe { msg_send![super(self), saveToURL: url, ofType: kind, forSaveOperation: op, completionHandler: &*done] };
-        }
-        // NSDocument counts the rebase's undo group on a later run-loop turn;
-        // saving first would leave the saved document marked edited.
-        let (this, url, kind) = (self.retain(), url.retain(), kind.copy());
-        self.ivars().deferred_saves.borrow_mut().push(Box::new(move || unsafe {
-            msg_send![super(&*this), saveToURL: &*url, ofType: &*kind, forSaveOperation: op, completionHandler: &*done]
-        }));
-        let modes = NSArray::from_slice(&[unsafe { objc2_foundation::NSRunLoopCommonModes }]);
-        // SAFETY: `prasastiContinueSaves` is a no-argument void method of ours.
-        unsafe {
-            let _: () = msg_send![self, performSelector: sel!(prasastiContinueSaves), withObject: None::<&AnyObject>, afterDelay: 0.0f64, inModes: &*modes];
-        }
+        unsafe { msg_send![super(self), saveToURL: url, ofType: kind, forSaveOperation: op, completionHandler: &*done] }
     }
 
     /// Before a Save or Save As into another folder: copies this document's
@@ -487,8 +465,9 @@ impl PrasastiDocument {
             remove_copies(&copies);
             return None;
         };
-        let new_len = edit.replacement.encode_utf16().count();
-        let r = Rebased { start: edit.range.start, old_len: edit.range.len(), new_len, copies };
+        let replacement: Vec<u16> = edit.replacement.encode_utf16().collect();
+        let len_after = text.len() - edit.range.len() + replacement.len();
+        let r = Rebased { start: edit.range.start, old_len: edit.range.len(), new_len: replacement.len(), replacement, len_after, copies };
         let undo = editor.undoManager();
         // Its own top-level group, closed now, so the change count counts it
         // before the save's token is taken: the saved document is clean.
@@ -507,13 +486,35 @@ impl PrasastiDocument {
         Some(r)
     }
 
+    /// After a rebasing save: NSDocument counts the rebase's undo group on a
+    /// later run-loop turn, after the save took its change-count token, which
+    /// would mark the saved document edited. One turn later, clears that, but
+    /// only while the text is still exactly what this save wrote.
+    fn clean_after_rebase(&self) {
+        let (Some(written), Some(url)) = (self.ivars().last_known.borrow().clone(), self.fileURL()) else { return };
+        let weak = objc2::rc::Weak::from_retained(&self.retain());
+        let block = RcBlock::new(move |_: std::ptr::NonNull<objc2_foundation::NSTimer>| {
+            guarded(|| {
+                let Some(doc) = weak.load() else { return };
+                if doc.fileURL().is_some_and(|u| u == url) && doc.file_bytes() == written {
+                    doc.updateChangeCount(NSDocumentChangeType::ChangeCleared);
+                }
+            });
+        });
+        // SAFETY: a scheduled timer fires on this (the main) thread's run loop,
+        // so the non-Send block never leaves it.
+        unsafe { objc2_foundation::NSTimer::scheduledTimerWithTimeInterval_repeats_block(0.0, false, &block) };
+    }
+
     /// After a failed save: undoes the rebase, if nothing was done after it,
     /// and deletes the copies it made.
     fn unrebase(&self, r: &Rebased) {
         remove_copies(&r.copies);
         let Some(editor) = self.editor() else { return };
         let Some(undo) = editor.undoManager() else { return };
-        if undo.canUndo() && undo.undoActionName().to_string() == "Update Image Paths" {
+        let text = crate::util::to_u16(&editor.string());
+        let untouched = text.len() == r.len_after && text.get(r.start..r.start + r.new_len) == Some(&r.replacement[..]);
+        if untouched && undo.canUndo() && undo.undoActionName().to_string() == "Update Image Paths" {
             keep_selection(&editor, r.start + r.new_len, r.old_len as isize - r.new_len as isize, || undo.undo());
         }
     }
@@ -885,6 +886,9 @@ struct Rebased {
     start: usize,
     old_len: usize,
     new_len: usize,
+    /// What the rebase wrote at `start`, and the text length right after it.
+    replacement: Vec<u16>,
+    len_after: usize,
     /// The asset copies this save created.
     copies: Vec<PathBuf>,
 }

@@ -2165,6 +2165,32 @@ fn carry_never_overwrites() {
     });
 }
 
+/// Typing right after a rebasing save completes, before the deferred clear runs:
+/// the document stays edited.
+fn typing_after_rebasing_save_stays_edited() {
+    on_disk("rebase-typing", "a\n", |fx| {
+        let e = fx.doc.editor().unwrap();
+        e.setString(&NSString::from_str(&format!("![]({}/x.png)\n", fx.path.parent().unwrap().display())));
+        let b = fx.path.parent().unwrap().join("b");
+        std::fs::create_dir_all(&b).unwrap();
+        let finished = std::rc::Rc::new(std::cell::Cell::new(false));
+        let f = finished.clone();
+        let typed = e.clone();
+        let done = block2::RcBlock::new(move |err: *mut NSError| {
+            assert!(err.is_null(), "save succeeds");
+            // SAFETY: an NSString is a valid insertText: argument.
+            unsafe { typed.insertText_replacementRange(ns_string!("z"), NSRange::new(NSNotFound as usize, 0)) };
+            f.set(true);
+        });
+        let url = NSURL::fileURLWithPath(&NSString::from_str(b.join("new.md").to_str().unwrap()));
+        fx.doc.saveToURL_ofType_forSaveOperation_completionHandler(&url, ns_string!(MD), objc2_app_kit::NSSaveOperationType::SaveAsOperation, &done);
+        wait_until(|| finished.get());
+        ui::pump(0.1);
+        assert!(fx.text().ends_with('z'));
+        assert!(fx.doc.isDocumentEdited(), "unsaved typing never reads as saved");
+    });
+}
+
 fn set_mode(p: &std::path::Path, mode: u32) {
     use std::os::unix::fs::PermissionsExt;
     std::fs::set_permissions(p, std::fs::Permissions::from_mode(mode)).unwrap();
@@ -2721,6 +2747,7 @@ fn main() {
         ("carry_never_overwrites", carry_never_overwrites),
         ("autosave_never_rebases", autosave_never_rebases),
         ("failed_save_reverts_rebase", failed_save_reverts_rebase),
+        ("typing_after_rebasing_save_stays_edited", typing_after_rebasing_save_stays_edited),
         ("failed_copy_keeps_original_link", failed_copy_keeps_original_link),
         ("save_to_never_rebases", save_to_never_rebases),
     ];
