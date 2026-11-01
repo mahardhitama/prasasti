@@ -78,9 +78,11 @@ define_class!(
             guarded(|| self.apply_insets());
         }
 
-        #[unsafe(method(modeChanged:))]
-        fn mode_changed(&self, _sender: Option<&AnyObject>) {
-            guarded(|| self.set_mode(self.ivars().toolbar.selected()));
+        #[unsafe(method(viewDidChangeEffectiveAppearance))]
+        fn view_did_change_effective_appearance(&self) {
+            // SAFETY: NSView's own implementation, same signature.
+            let () = unsafe { msg_send![super(self), viewDidChangeEffectiveAppearance] };
+            guarded(|| self.ivars().toolbar.apply_appearance());
         }
         #[unsafe(method(showPreview:))]
         fn show_preview(&self, _sender: Option<&AnyObject>) {
@@ -174,7 +176,7 @@ impl DocumentView {
         let find_bar = FindBar::new(mtm, &editor);
         let status = StatusPill::new(mtm);
         editor.set_status_pill(&status);
-        let toolbar = Toolbar::new(mtm, sel!(modeChanged:));
+        let toolbar = Toolbar::new(mtm);
         let this = Self::alloc(mtm).set_ivars(Ivars {
             editor,
             scroll,

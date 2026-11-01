@@ -2127,12 +2127,42 @@ fn cmd_e_toggles_mode() {
 fn toolbar_click_switches_mode() {
     let (win, _e) = ui::window_with("x");
     let v = content_of(&win);
-    let seg = v.toolbar().segment();
-    for (i, want) in [(0, Mode::Preview), (1, Mode::Edit)] {
-        seg.setSelectedSegment(i);
-        // SAFETY: the control's own action and target.
-        unsafe { seg.sendAction_to(seg.action(), seg.target().as_deref()) };
+    let [preview, edit] = v.toolbar().buttons();
+    for (b, want) in [(&preview, Mode::Preview), (&edit, Mode::Edit)] {
+        // SAFETY: no sender, as a mouse click has none here.
+        unsafe { b.performClick(None) };
         assert_eq!(v.mode(), want);
+        assert_eq!(v.toolbar().selected(), want);
+    }
+    win.close();
+}
+
+fn toolbar_thumb_tracks_mode() {
+    let (win, _e) = ui::window_with("x");
+    win.orderFrontRegardless(); // on screen, so the thumb slides
+    let v = content_of(&win);
+    let [preview, edit] = v.toolbar().buttons();
+    for (m, b) in [(Mode::Preview, &preview), (Mode::Edit, &edit), (Mode::Preview, &preview)] {
+        v.set_mode(m);
+        ui::pump(0.6);
+        let (t, f) = (v.toolbar().thumb().frame(), b.frame());
+        let dx = (t.origin.x + t.size.width / 2.0) - (f.origin.x + f.size.width / 2.0);
+        assert!(dx.abs() <= 1.0, "{m:?}: thumb {t:?} button {f:?}");
+    }
+    win.close();
+}
+
+fn toolbar_accessibility() {
+    use objc2_app_kit::NSAccessibility;
+    let (win, _e) = ui::window_with("x");
+    let v = content_of(&win);
+    let [preview, edit] = v.toolbar().buttons();
+    assert_eq!(preview.title().to_string(), "Preview");
+    assert_eq!(edit.title().to_string(), "Edit");
+    for (m, on) in [(Mode::Preview, true), (Mode::Edit, false)] {
+        v.set_mode(m);
+        assert_eq!(preview.isAccessibilitySelected(), on);
+        assert_eq!(edit.isAccessibilitySelected(), !on);
     }
     win.close();
 }
@@ -2444,6 +2474,8 @@ fn main() {
         ("file_opens_in_preview_untitled_in_edit", file_opens_in_preview_untitled_in_edit),
         ("cmd_e_toggles_mode", cmd_e_toggles_mode),
         ("toolbar_click_switches_mode", toolbar_click_switches_mode),
+        ("toolbar_thumb_tracks_mode", toolbar_thumb_tracks_mode),
+        ("toolbar_accessibility", toolbar_accessibility),
         ("preview_ignores_typing_and_edit_commands", preview_ignores_typing_and_edit_commands),
         ("cmd_f_in_preview_opens_find_in_edit", cmd_f_in_preview_opens_find_in_edit),
         ("preview_rerenders_after_reload", preview_rerenders_after_reload),
