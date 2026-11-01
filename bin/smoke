@@ -1,0 +1,105 @@
+#!/bin/sh
+# Accessibility smoke test: drives the real target/Prasasti.app through
+# System Events (open, type, autosave, external change, quit).
+# Needs Accessibility permission for the terminal. Exit 0 = all ok,
+# 1 = a check failed (named in the output), 2 = no permission.
+set -e
+cd "$(dirname "$0")/.."
+
+if pgrep -x prasasti >/dev/null; then
+    echo "bin/smoke: Praśasti is already running; quit it first (the smoke run must own its instance)." >&2
+    exit 1
+fi
+
+bin/bundle >/dev/null
+
+drafts="$HOME/Library/Autosave Information"
+tmp=$(mktemp -d)
+before="$tmp/drafts-before"
+ls "$drafts" 2>/dev/null >"$before" || true
+cleanup() {
+    # Only ever our own instance: nothing else was running when we started.
+    pid=$(pgrep -x prasasti || true)
+    [ -n "$pid" ] && kill $pid 2>/dev/null
+    # Recovery drafts this run created for note.md, nothing else.
+    ls "$drafts" 2>/dev/null | grep '^note' | while IFS= read -r f; do
+        grep -qxF "$f" "$before" || rm -f "$drafts/$f"
+    done
+    rm -rf "$tmp"
+}
+trap cleanup EXIT INT TERM
+
+mkdir "$tmp/notes"
+note="$tmp/notes/note.md"
+printf '# Smoke\n' >"$note"
+
+osascript -l JavaScript - "$PWD/target/Prasasti.app" "$note" <<'JXA'
+ObjC.import('Foundation'); ObjC.import('stdlib')
+function run(argv) {
+    const [appPath, note] = argv
+    const se = Application('System Events')
+    const sh = Application.currentApplication()
+    sh.includeStandardAdditions = true
+
+    if (!se.uiElementsEnabled()) {
+        console.log('bin/smoke needs Accessibility permission for this terminal: System Settings > Privacy & Security > Accessibility')
+        $.exit(2)
+    }
+
+    const q = s => "'" + s.replace(/'/g, "'\\''") + "'"
+    const wait = (secs, f) => {
+        for (const end = Date.now() + secs * 1000; Date.now() < end; delay(0.1)) {
+            try { const v = f(); if (v) return v } catch (e) {}
+        }
+        return null
+    }
+    const check = (name, ok) => {
+        console.log('smoke ' + name + ' ... ' + (ok ? 'ok' : 'FAILED'))
+        if (!ok) $.exit(1)
+    }
+    const disk = () => $.NSString.stringWithContentsOfFileEncodingError(note, $.NSUTF8StringEncoding, null).js
+    const proc = () => se.processes.byName('prasasti')
+    const win = () => proc().windows.byName('note.md')
+    // Keys go to the frontmost app: never send them unless it is ours.
+    const front = () => wait(1, () => { proc().frontmost = true; delay(0.05); return proc().frontmost() })
+    const keys = (name, f) => { if (!front()) check(name + ' (Praśasti not frontmost, no keys sent)', false); f() }
+
+    // Ignore saved windows from earlier runs; an argument, not a defaults write.
+    sh.doShellScript('open -a ' + q(appPath) + ' ' + q(note) + ' --args -ApplePersistenceIgnoreState YES')
+    if (!wait(5, () => win().exists())) {
+        // Usually an alert window ("could not be opened"): show its text.
+        try { console.log(proc().windows.staticTexts.value().flat().join(' ')) } catch (e) {}
+        check('open', false)
+    }
+    check('open', true)
+
+    const ta = () => win().scrollAreas[0].textAreas[0]
+    keys('type', () => {
+        ta().focused = true
+        se.keyCode(125, { using: 'command down' }) // ⌘↓: end of text
+        se.keystroke('hello')
+    })
+    check('type', wait(2, () => ta().value() === '# Smoke\nhello'))
+
+    // autosavingDelay is 0, so AppKit's own in-place schedule applies: the
+    // write lands ~15 s after the edit (measured), not within 10 s.
+    check('autosave', wait(30, () => disk().includes('hello')))
+
+    // shortcut: typing within ~0.1 s of the autosave write loses track of the
+    // edit (see task-15 report); settle until the app fixes that race.
+    delay(2)
+    keys('external-change', () => se.keystroke('x'))
+    wait(2, () => ta().value().endsWith('x'))
+    sh.doShellScript("printf 'external\\n' > " + q(note))
+    const sheet = wait(5, () => {
+        const s = win().sheets[0]
+        return s.buttons.byName('Reload').exists() && s.buttons.byName('Keep Mine').exists() && s
+    })
+    check('external-change sheet', sheet)
+    sheet.buttons.byName('Reload').click()
+    check('external-change reload', wait(5, () => ta().value() === 'external\n'))
+
+    keys('quit', () => se.keystroke('q', { using: 'command down' }))
+    check('quit', wait(5, () => !proc().exists()))
+}
+JXA
