@@ -1988,6 +1988,25 @@ fn second_window_cascades() {
     b.close();
 }
 
+fn last_closed_window_frame_is_stored() {
+    fresh_defaults();
+    close_all_documents();
+    // Differs from the frame earlier tests left saved, which A would restore.
+    let d = distinctive_frame();
+    let want = NSRect::new(NSPoint::new(d.origin.x + 50.0, d.origin.y + 30.0), NSSize::new(d.size.width - 100.0, 450.0));
+    // A and B overlap; A closes first, then B is moved and closed: B's frame wins.
+    autoreleasepool(|_| {
+        let a = doc_from(b"a");
+        a.makeWindowControllers();
+        let b = doc_from(b"b");
+        b.makeWindowControllers();
+        a.close();
+        document_window(&b).setFrame_display(want, false);
+        b.close();
+    });
+    assert_frames_equal(open_resize_close(doc_from(b"c"), want), want);
+}
+
 fn no_window_tabbing() {
     let d = doc_from(b"x");
     d.makeWindowControllers();
@@ -2151,6 +2170,7 @@ fn main() {
         ("kitchen_sink_lines_fit_column", kitchen_sink_lines_fit_column),
         ("frame_restored_exactly", frame_restored_exactly),
         ("second_window_cascades", second_window_cascades),
+        ("last_closed_window_frame_is_stored", last_closed_window_frame_is_stored),
         ("no_window_tabbing", no_window_tabbing),
     ];
     let mut failed = 0;

@@ -23,7 +23,7 @@ use prasasti_core::file::{decode, normalize_newlines, saves_unchanged};
 
 use crate::content::DocumentView;
 use crate::editor::EditorView;
-use crate::util::guarded;
+use crate::util::{Observer, guarded, observe};
 
 /// Whether external-change and deletion sheets are shown (off in tests).
 pub static SHEETS_ENABLED: AtomicBool = AtomicBool::new(true);
@@ -57,6 +57,8 @@ pub struct Ivars {
     /// Our open sheet (for which hold) and a counter that retires stale ones.
     sheet: RefCell<Option<(HoldReason, Retained<NSWindow>)>>,
     sheet_gen: Cell<u64>,
+    /// Saves the window's frame when it moves, resizes or closes.
+    frame_observers: RefCell<Vec<Observer>>,
 }
 
 impl Ivars {
@@ -70,6 +72,7 @@ impl Ivars {
             previous_draft: RefCell::new(None),
             sheet: RefCell::new(None),
             sheet_gen: Cell::new(0),
+            frame_observers: RefCell::new(Vec::new()),
         }
     }
 }
@@ -162,19 +165,34 @@ define_class!(
                 Some(&window),
             );
             window.center();
-            // The first window gets the saved frame exactly, so AppKit's
-            // cascade must not shift it. While another document window is
-            // open, the name is taken (no restore, no autosave): this one
-            // takes the saved size and cascades from that window.
+            // Every window shares one saved frame, written by whichever
+            // window moved, resized or closed last (below). The first window
+            // gets it exactly, so AppKit's cascade must not shift it; while
+            // another document window is open, this one takes the saved size
+            // and cascades from that window.
             controller.setShouldCascadeWindows(false);
             let others = other_document_windows(mtm, &window);
-            controller.setWindowFrameAutosaveName(ns_string!("PrasastiMain"));
-            if let Some(other) = others.last() {
-                window.setFrameUsingName(ns_string!("PrasastiMain"));
+            window.setFrameUsingName(frame_name());
+            if let Some(other) = others.iter().find(|w| w.isKeyWindow()).or(others.last()) {
                 let f = other.frame();
                 let next = window.cascadeTopLeftFromPoint(NSPoint::new(f.origin.x, f.origin.y + f.size.height));
                 window.cascadeTopLeftFromPoint(next);
             }
+            let sender: &AnyObject = &window;
+            *self.ivars().frame_observers.borrow_mut() = [
+                "NSWindowDidMoveNotification",
+                "NSWindowDidEndLiveResizeNotification",
+                "NSWindowWillCloseNotification",
+            ]
+            .map(|name| {
+                let weak = objc2::rc::Weak::new(&*window);
+                observe(name, Some(sender), move || {
+                    if let Some(w) = weak.load() {
+                        w.saveFrameUsingName(frame_name());
+                    }
+                })
+            })
+            .into();
             // A restored frame may be narrower than the column.
             content.update_min_width();
             self.addWindowController(&controller);
@@ -744,6 +762,10 @@ impl PrasastiDocument {
     pub fn editor(&self) -> Option<Retained<EditorView>> {
         self.ivars().editor.borrow().clone()
     }
+}
+
+fn frame_name() -> &'static NSString {
+    ns_string!("PrasastiMain")
 }
 
 /// The other windows that show a document.
