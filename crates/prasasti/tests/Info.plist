@@ -6,6 +6,8 @@
 	     its own id keeps the tests out of the app's defaults domain. -->
 	<key>CFBundleIdentifier</key>
 	<string>com.mahardhitama.prasasti.tests</string>
+	<key>LSMinimumSystemVersion</key>
+	<string>26.0</string>
 	<key>CFBundleName</key>
 	<string>PrasastiTests</string>
 </dict>

@@ -4,6 +4,7 @@ pub mod editor;
 pub mod export;
 pub mod find_bar;
 pub mod footer;
+pub mod glass;
 pub mod menu;
 pub mod settings;
 pub mod styler;

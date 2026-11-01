@@ -1767,6 +1767,24 @@ fn recheck_skips_closed_document() {
     });
 }
 
+fn glass_and_webkit_available() {
+    use objc2::runtime::AnyClass;
+    use objc2_app_kit::NSTextField;
+    assert!(AnyClass::get(c"NSGlassEffectView").is_some());
+    let glass = prasasti::glass::GlassView::new(mtm());
+    let field = NSTextField::new(mtm());
+    glass.setContentView(Some(&field));
+    assert!(glass.contentView().is_some_and(|v| Retained::as_ptr(&v) == Retained::as_ptr(&field).cast()));
+    let web = unsafe {
+        objc2_web_kit::WKWebView::initWithFrame_configuration(
+            mtm().alloc(),
+            NSRect::new(NSPoint::new(0.0, 0.0), NSSize::new(100.0, 100.0)),
+            &objc2_web_kit::WKWebViewConfiguration::new(mtm()),
+        )
+    };
+    drop(web);
+}
+
 fn main() {
     let app = NSApplication::sharedApplication(mtm());
     // Pin the light (Aqua) appearance before any window: colour assertions use
@@ -1863,6 +1881,7 @@ fn main() {
         ("duplicate_clears_snapshot", duplicate_clears_snapshot),
         ("recheck_skips_closed_document", recheck_skips_closed_document),
         ("paste_undoes_alone", paste_undoes_alone),
+        ("glass_and_webkit_available", glass_and_webkit_available),
     ];
     let mut failed = 0;
     for (name, f) in tests {
