@@ -21,9 +21,12 @@ fn rgb(hex: u32) -> Retained<NSColor> {
 /// The palette as sRGB hex, in `Palette` field order (Preview's CSS uses it too).
 pub fn hex(dark: bool) -> [u32; 8] {
     if dark {
-        [0x101010, 0xeeeeee, 0x5584aa, 0x4f525a, 0x1d1d1d, 0x186a9a, 0x725b18, 0xb36b20]
+        // Catppuccin Mocha: base, text, blue, overlay0, mantle, surface1,
+        // yellow 30% and peach 45% over base (highlights must be opaque).
+        [0x1e1e2e, 0xcdd6f4, 0x89b4fa, 0x6c7086, 0x181825, 0x45475a, 0x605955, 0x816156]
     } else {
-        [0xffffff, 0x222324, 0x2077b2, 0xaeb1b5, 0xf2f2f2, 0x2077b2, 0xffe58a, 0xffad42]
+        // Catppuccin Latte, same roles; yellow 30% and peach 40% over base.
+        [0xeff1f5, 0x4c4f69, 0x1e66f5, 0x9ca0b0, 0xe6e9ef, 0xbcc0cc, 0xead3b4, 0xf5b897]
     }
 }
 

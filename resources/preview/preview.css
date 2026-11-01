@@ -38,9 +38,12 @@ hr { border: none; border-top: 1px solid var(--marker); }
   --pele-accent: var(--accent);
 }
 .render-error {
-  color: #c0392b;
-  border-left: 3px solid #c0392b;
+  color: #d20f39; /* Catppuccin Latte red */
+  border-left: 3px solid currentColor;
   padding: 0.2em 0.8em;
   margin: -0.5em 0 1em;
   white-space: pre-wrap;
+}
+@media (prefers-color-scheme: dark) {
+  .render-error { color: #f38ba8; } /* Catppuccin Mocha red */
 }
