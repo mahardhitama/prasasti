@@ -1,5 +1,6 @@
 pub mod edit;
 pub mod file;
+pub mod images;
 pub mod list;
 pub mod markdown;
 pub mod search;

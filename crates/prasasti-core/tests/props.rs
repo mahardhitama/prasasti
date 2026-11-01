@@ -2,6 +2,7 @@
 //! `\r`, lone surrogates and out-of-range positions.
 
 use prasasti_core::edit::{insert_link, toggle_emphasis, Edit};
+use prasasti_core::images::{format_destination, image_destinations, rebase, relative_path};
 use prasasti_core::markdown::{style_paragraph, BlockState};
 use prasasti_core::search::find_matches;
 use prasasti_core::words::count_words;
@@ -47,6 +48,21 @@ fn listy() -> impl Strategy<Value = Vec<u16>> {
         .prop_map(String::from);
     let lines = prop::collection::vec(prop_oneof![8 => item, 2 => other], 1..8);
     lines.prop_map(|v| v.join("\n").encode_utf16().collect())
+}
+
+/// Image-heavy text: `text()` mixed with whole and broken image syntax.
+fn imagey() -> impl Strategy<Value = Vec<u16>> {
+    let piece = proptest::sample::select(vec![
+        "![a](/d/i.png)", "![", "](", "<", ">", ")", "\\", "`", "```\n", "\n", " \"t\"", "file:///d/a%20b.png", "![x](<../a b.png> 'q')", "%", "%zz", "😀",
+    ]);
+    let pieces = prop::collection::vec(piece, 0..12).prop_map(|v| v.concat().encode_utf16().collect::<Vec<u16>>());
+    prop_oneof![3 => pieces, 1 => text()]
+}
+
+/// Slash-separated paths, with `.`, `..` and empty parts.
+fn path() -> impl Strategy<Value = Vec<u16>> {
+    let part = proptest::sample::select(vec!["", ".", "..", "a", "b c", "😀"]);
+    prop::collection::vec(part, 0..6).prop_map(|v| format!("/{}", v.join("/")).encode_utf16().collect())
 }
 
 fn in_bounds(text: &[u16], e: &Edit) {
@@ -101,6 +117,31 @@ proptest! {
         if let Some(e) = list::indent(&t, sel, outdent) {
             in_bounds(&t, &e);
         }
+    }
+
+    #[test]
+    fn image_destinations_in_text(t in imagey()) {
+        for d in image_destinations(&t) {
+            prop_assert!(d.range.start < d.range.end && d.range.end <= t.len(), "{:?}", d.range);
+        }
+    }
+
+    #[test]
+    fn rebase_in_bounds(t in imagey(), old in proptest::option::of(path()), new in path()) {
+        if let Some(e) = rebase(&t, old.as_deref(), &new, |_| None) {
+            in_bounds(&t, &e);
+        }
+    }
+
+    #[test]
+    fn relative_path_never_panics(from in path(), to in path()) {
+        relative_path(&from, &to);
+    }
+
+    #[test]
+    fn format_destination_wraps(p in text(), angled in any::<bool>()) {
+        let f = format_destination(&p, angled);
+        prop_assert!(f.len() == p.len() || f.len() == p.len() + 2);
     }
 
     #[test]
