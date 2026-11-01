@@ -28,9 +28,25 @@ fn text() -> impl Strategy<Value = Vec<u16>> {
     prop_oneof![3 => string, 1 => prop::collection::vec(unit, 0..40)]
 }
 
-/// Positions run past the end of the text, and `a..b` may be reversed.
-fn range() -> impl Strategy<Value = Range> {
-    (0usize..50, 0usize..50).prop_map(|(a, b)| a..b)
+/// Positions run 0..=len+2, so past the end, and `a..b` may be reversed.
+fn with_range(t: impl Strategy<Value = Vec<u16>>) -> impl Strategy<Value = (Vec<u16>, Range)> {
+    t.prop_flat_map(|t| {
+        let max = t.len() + 2;
+        (Just(t), 0..=max, 0..=max).prop_map(|(t, a, b)| (t, a..b))
+    })
+}
+
+/// Mostly list lines (indent of spaces/tabs, marker, space, text), with the
+/// odd blank, prose, rule or fence line, so `indent` often takes the edit.
+fn listy() -> impl Strategy<Value = Vec<u16>> {
+    let indent = proptest::sample::select(vec!["", "", " ", "  ", "    ", "\t", " \t", "        "]);
+    let marker = proptest::sample::select(vec!["-", "+", "*", "1.", "10)", "99."]);
+    let item = (indent, marker, proptest::sample::select(vec!["a", "😀 b", "", "[l](u)"]))
+        .prop_map(|(i, m, t)| format!("{i}{m} {t}"));
+    let other = proptest::sample::select(vec!["", " ", "  more", "Para", "```", "~~~", "* * *", "- - -"])
+        .prop_map(String::from);
+    let lines = prop::collection::vec(prop_oneof![8 => item, 2 => other], 1..8);
+    lines.prop_map(|v| v.join("\n").encode_utf16().collect())
 }
 
 fn in_bounds(text: &[u16], e: &Edit) {
@@ -62,20 +78,26 @@ proptest! {
 
     #[test]
     fn toggle_emphasis_in_bounds(
-        t in text(),
-        sel in range(),
+        (t, sel) in with_range(text()),
         marker in proptest::sample::select(vec!["**", "*", "~~", "_"]),
     ) {
         in_bounds(&t, &toggle_emphasis(&t, sel, marker));
     }
 
     #[test]
-    fn insert_link_in_bounds(t in text(), sel in range(), url in ".{0,20}") {
+    fn insert_link_in_bounds((t, sel) in with_range(text()), url in ".{0,20}") {
         in_bounds(&t, &insert_link(&t, sel, &url));
     }
 
     #[test]
-    fn indent_in_bounds(t in text(), sel in range(), outdent in any::<bool>()) {
+    fn indent_in_bounds((t, sel) in with_range(text()), outdent in any::<bool>()) {
+        if let Some(e) = list::indent(&t, sel, outdent) {
+            in_bounds(&t, &e);
+        }
+    }
+
+    #[test]
+    fn indent_in_bounds_on_lists((t, sel) in with_range(listy()), outdent in any::<bool>()) {
         if let Some(e) = list::indent(&t, sel, outdent) {
             in_bounds(&t, &e);
         }
@@ -85,4 +107,25 @@ proptest! {
     fn count_words_never_panics(t in text()) {
         count_words(&t);
     }
+}
+
+/// The list property is only worth something if `indent` takes the edit, so
+/// sweep every selection over a list text and require that it does.
+#[test]
+fn indent_takes_edits_on_lists() {
+    let t: Vec<u16> = "- a\n    - b\n  more\n\n\t1. c\n```\n- x\n```\n* * *\n10) d"
+        .encode_utf16()
+        .collect();
+    let mut some = 0;
+    for a in 0..=t.len() + 2 {
+        for b in 0..=t.len() + 2 {
+            for outdent in [false, true] {
+                if let Some(e) = list::indent(&t, a..b, outdent) {
+                    some += 1;
+                    in_bounds(&t, &e);
+                }
+            }
+        }
+    }
+    assert!(some > 100, "only {some} edits");
 }
