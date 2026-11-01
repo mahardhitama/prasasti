@@ -10,8 +10,8 @@ use objc2::runtime::{AnyObject, Bool, Sel};
 use objc2::{DefinedClass, MainThreadOnly, Message, define_class, msg_send, sel};
 use objc2_app_kit::{
     NSAlert, NSAlertFirstButtonReturn, NSFont, NSFontAttributeName, NSFontManager, NSAttributedStringDocumentFormats, NSDocumentTypeDocumentOption, NSHTMLTextDocumentType, NSTimeoutDocumentOption, NSColor, NSForegroundColorAttributeName, NSLayoutManager, NSPrintInfo, NSPrintOperation, NSTextContainer, NSTextStorage, NSTextView, NSAlertSecondButtonReturn, NSBackingStoreType, NSDocument,
-    NSDocumentChangeType, NSLayoutAttribute, NSModalResponse, NSSaveOperationType, NSStackView,
-    NSUserInterfaceLayoutOrientation, NSView, NSWindow, NSWindowController, NSWindowStyleMask,
+    NSDocumentChangeType, NSModalResponse, NSSaveOperationType,
+    NSWindow, NSWindowController, NSWindowStyleMask, NSWindowTitleVisibility,
 };
 use objc2_foundation::{
     MainThreadMarker, NSArray, NSAttributedString, NSCocoaErrorDomain, NSCopying, NSData, NSDate, NSDictionary, NSError,
@@ -21,9 +21,8 @@ use objc2_foundation::{
 };
 use prasasti_core::file::{decode, normalize_newlines, saves_unchanged};
 
-use crate::editor::{EditorView, editor_in_scroll};
-use crate::find_bar::FindBar;
-use crate::footer::Footer;
+use crate::content::DocumentView;
+use crate::editor::EditorView;
 use crate::util::guarded;
 
 /// Whether external-change and deletion sheets are shown (off in tests).
@@ -140,12 +139,17 @@ define_class!(
                     NSWindowStyleMask::Titled
                         | NSWindowStyleMask::Closable
                         | NSWindowStyleMask::Miniaturizable
-                        | NSWindowStyleMask::Resizable,
+                        | NSWindowStyleMask::Resizable
+                        | NSWindowStyleMask::FullSizeContentView,
                     NSBackingStoreType::Buffered,
                     false,
                 )
             };
             unsafe { window.setReleasedWhenClosed(false) };
+            // Chromeless: the traffic lights stay; the title remains for the
+            // Window menu, Mission Control and Accessibility.
+            window.setTitlebarAppearsTransparent(true);
+            window.setTitleVisibility(NSWindowTitleVisibility::Hidden);
 
             let (content, editor) = window_content(frame);
             editor.setString(&self.ivars().text.borrow());
@@ -158,6 +162,8 @@ define_class!(
             );
             window.center();
             controller.setWindowFrameAutosaveName(ns_string!("PrasastiMain"));
+            // A restored frame may be narrower than the column.
+            content.update_min_width();
             self.addWindowController(&controller);
             *self.ivars().editor.borrow_mut() = Some(editor);
             self.set_hold(self.hold());
@@ -493,14 +499,13 @@ impl PrasastiDocument {
 
     fn set_hold(&self, hold: Option<HoldReason>) {
         self.ivars().autosave_hold.set(hold);
-        let status = match hold {
-            None => "",
-            Some(HoldReason::LineEndings) => "Auto-save paused: line endings",
-            Some(HoldReason::ExternalChange) => "Auto-save paused: file changed on disk",
-            Some(HoldReason::Deleted) => "Auto-save paused: file deleted",
-        };
-        if let Some(footer) = self.editor().and_then(|e| e.footer()) {
-            footer.set_paused(status);
+        let text = hold.map(|h| match h {
+            HoldReason::LineEndings => "Auto-save paused: line endings",
+            HoldReason::ExternalChange => "Auto-save paused: file changed on disk",
+            HoldReason::Deleted => "Auto-save paused: file deleted",
+        });
+        if let Some(status) = self.editor().and_then(|e| e.status()) {
+            status.set_paused(text);
         }
     }
 
@@ -728,18 +733,12 @@ impl PrasastiDocument {
     }
 }
 
-/// The window's content, top to bottom: the (hidden) find bar, the editor, the footer.
-pub fn window_content(frame: NSRect) -> (Retained<NSStackView>, Retained<EditorView>) {
+/// The window's content (find bar, editor, status pill) and its editor.
+pub fn window_content(frame: NSRect) -> (Retained<DocumentView>, Retained<EditorView>) {
     let mtm = MainThreadMarker::new().expect("windows are built on the main thread");
-    let (scroll, editor) = editor_in_scroll(frame);
-    let bar = FindBar::new(mtm, &editor);
-    let footer = Footer::new(mtm, &editor);
-    let stack = NSStackView::stackViewWithViews(&NSArray::from_slice(&[&*bar as &NSView, &scroll, &footer]), mtm);
-    stack.setFrame(frame);
-    stack.setOrientation(NSUserInterfaceLayoutOrientation::Vertical);
-    stack.setAlignment(NSLayoutAttribute::Width);
-    stack.setSpacing(0.0);
-    (stack, editor)
+    let content = DocumentView::new(mtm, frame);
+    let editor = content.editor();
+    (content, editor)
 }
 
 fn drafts_dir_url(create: bool) -> Option<Retained<NSURL>> {

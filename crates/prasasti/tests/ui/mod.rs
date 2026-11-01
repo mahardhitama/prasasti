@@ -24,7 +24,7 @@ fn mtm() -> MainThreadMarker {
 }
 
 /// An off-screen window (never ordered front) holding the document window's
-/// content (find bar, editor in a scroll view), the editor first responder, and the app's main menu installed.
+/// content (DocumentView: find bar, editor in a scroll view, status pill), the editor first responder, and the app's main menu installed.
 pub fn window_with(text: &str) -> (Retained<NSWindow>, Retained<EditorView>) {
     let mtm = mtm();
     let frame = NSRect::new(NSPoint::new(0.0, 0.0), NSSize::new(600.0, 400.0));

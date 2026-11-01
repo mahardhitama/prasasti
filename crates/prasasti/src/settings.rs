@@ -6,11 +6,12 @@ use objc2::rc::Retained;
 use objc2_app_kit::{NSFont, NSFontManager, NSFontTraitMask, NSFontWeightRegular};
 use objc2_foundation::{MainThreadMarker, NSNotificationCenter, NSString, NSUserDefaults};
 
-/// Posted after the font or zoom changes; every open editor restyles.
+/// Posted after the font, zoom or column width changes; every open editor restyles.
 pub const CHANGED: &str = "PrasastiSettingsChanged";
 
 const FONT_KEY: &str = "editorFont";
 const ZOOM_KEY: &str = "textZoom";
+const COLUMNS_KEY: &str = "columnWidth";
 pub const DEFAULT_FAMILY: &str = "JetBrains Mono";
 pub const BASE_SIZE: f64 = 15.0;
 
@@ -51,6 +52,22 @@ pub fn set_zoom(zoom: f64) {
     notify();
 }
 
+/// The editor's column, in characters (80 when unset).
+pub fn column_width() -> usize {
+    let key = NSString::from_str(COLUMNS_KEY);
+    let d = defaults();
+    if d.objectForKey(&key).is_none() { 80 } else { clamp_columns(d.integerForKey(&key)) }
+}
+
+pub fn set_column_width(n: isize) {
+    defaults().setInteger_forKey(clamp_columns(n) as isize, &NSString::from_str(COLUMNS_KEY));
+    notify();
+}
+
+fn clamp_columns(n: isize) -> usize {
+    n.clamp(40, 200) as usize
+}
+
 fn notify() {
     // SAFETY: no object; observers ignore it.
     unsafe { NSNotificationCenter::defaultCenter().postNotificationName_object(&NSString::from_str(CHANGED), None) };
@@ -71,4 +88,16 @@ pub fn editor_font(family: &str, zoom: f64) -> Retained<NSFont> {
 /// The editor font from the current settings.
 pub fn current_font() -> Retained<NSFont> {
     editor_font(&font_family(), zoom())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::clamp_columns;
+
+    #[test]
+    fn clamps_columns() {
+        assert_eq!(clamp_columns(10), 40);
+        assert_eq!(clamp_columns(80), 80);
+        assert_eq!(clamp_columns(999), 200);
+    }
 }

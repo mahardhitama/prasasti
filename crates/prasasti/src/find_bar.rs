@@ -195,6 +195,7 @@ impl FindBar {
             v.setHidden(!replace);
         }
         self.setHidden(false);
+        self.toggled();
         if let Some(w) = self.window() {
             w.makeFirstResponder(Some(&self.ivars().search));
         }
@@ -204,11 +205,20 @@ impl FindBar {
     /// Hides the bar, clears the highlights and hands focus back to the editor.
     pub fn hide(&self) {
         self.setHidden(true);
+        self.toggled();
         self.ivars().matches.borrow_mut().clear();
         self.paint();
         let editor = &self.ivars().editor;
         if let Some(w) = self.window() {
             w.makeFirstResponder(Some(editor));
+        }
+    }
+
+    /// Lets the window's content move the text below or under the bar.
+    fn toggled(&self) {
+        // SAFETY: a plain getter.
+        if let Some(v) = unsafe { self.superview() }.and_then(|v| v.downcast::<crate::content::DocumentView>().ok()) {
+            v.find_bar_toggled();
         }
     }
 

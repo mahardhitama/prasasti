@@ -1,7 +1,10 @@
 use std::panic::{AssertUnwindSafe, catch_unwind};
 use std::ptr::NonNull;
 
-use objc2_foundation::{NSRange, NSString};
+use block2::RcBlock;
+use objc2::rc::Retained;
+use objc2::runtime::{AnyObject, ProtocolObject};
+use objc2_foundation::{NSNotification, NSNotificationCenter, NSObjectProtocol, NSRange, NSString};
 
 /// The string's UTF-16 code units, the unit every `core` range is measured in.
 pub fn to_u16(s: &NSString) -> Vec<u16> {
@@ -28,4 +31,31 @@ pub fn guarded<T>(f: impl FnOnce() -> T) -> Option<T> {
             None
         }
     }
+}
+
+/// A notification-centre observation, removed when dropped.
+pub struct Observer(Retained<ProtocolObject<dyn NSObjectProtocol>>);
+
+impl Drop for Observer {
+    fn drop(&mut self) {
+        // SAFETY: the token came from this centre's addObserverForName:….
+        unsafe { NSNotificationCenter::defaultCenter().removeObserver(self.0.as_ref()) };
+    }
+}
+
+/// Runs `f` (guarded) on each `name` notification from `object` (any sender when None).
+/// Only for notifications posted on the main thread, where the observers live.
+pub fn observe(name: &str, object: Option<&AnyObject>, f: impl Fn() + 'static) -> Observer {
+    let block = RcBlock::new(move |_: NonNull<NSNotification>| {
+        guarded(&f);
+    });
+    // SAFETY: no queue means the block runs on the posting thread, the main one.
+    Observer(unsafe {
+        NSNotificationCenter::defaultCenter().addObserverForName_object_queue_usingBlock(
+            Some(&NSString::from_str(name)),
+            object,
+            None,
+            &block,
+        )
+    })
 }

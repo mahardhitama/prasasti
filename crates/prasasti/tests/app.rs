@@ -18,7 +18,7 @@ use objc2_foundation::{
 use prasasti::document::{self, HoldReason, PrasastiDocument};
 use prasasti::editor::{EditorView, make_editor};
 use prasasti::find_bar::FindBar;
-use prasasti::footer::Footer;
+use prasasti::status::StatusPill;
 use prasasti::settings;
 use prasasti::styler::{Styler, hidden_key};
 use prasasti::theme::{base_font, palette};
@@ -409,7 +409,7 @@ fn copy_as_html_writes_both_types() {
         ui::shortcut(&win, "c", CMD | NSEventModifierFlags::Shift);
         let pb = NSPasteboard::generalPasteboard();
         let (html, text) = unsafe { (pb.stringForType(NSPasteboardTypeHTML), pb.stringForType(NSPasteboardTypeString)) };
-        let status = footer(&e).status();
+        let status = status(&e).text();
         win.close();
         (html.expect("html").to_string(), text.expect("text").to_string(), status)
     });
@@ -707,7 +707,7 @@ fn click_moves_current_highlight() {
 /// Points the settings at the test suite, emptied.
 fn fresh_defaults() {
     let d = test_defaults();
-    for k in ["editorFont", "textZoom"] {
+    for k in ["editorFont", "textZoom", "columnWidth"] {
         d.removeObjectForKey(&NSString::from_str(k));
     }
 }
@@ -716,8 +716,8 @@ fn test_defaults() -> Retained<NSUserDefaults> {
     NSUserDefaults::initWithSuiteName(NSUserDefaults::alloc(), Some(ns_string!("prasasti-tests"))).expect("suite")
 }
 
-fn footer(e: &EditorView) -> Retained<Footer> {
-    e.footer().expect("footer registered")
+fn status(e: &EditorView) -> Retained<StatusPill> {
+    e.status().expect("status pill registered")
 }
 
 fn point_size(e: &EditorView) -> f64 {
@@ -754,34 +754,38 @@ fn zoom_in_changes_point_size() {
     assert_eq!(settings::zoom(), 1.1);
     ui::shortcut(&win, "0", CMD);
     assert_eq!(point_size(&e), 15.0);
-    assert_eq!(footer(&e).status(), "Text size 100%");
+    assert_eq!(status(&e).text(), "Text size 100%");
     // Zoom is a view setting: no undo step, text untouched.
     assert!(!e.undoManager().is_some_and(|u| u.canUndo()));
     assert_eq!(e.string().to_string(), "# hi **b**");
     win.close();
 }
 
-fn zoom_status_at_limit() {
+fn zoom_flashes_text_size() {
     fresh_defaults();
     settings::set_zoom(3.0);
     let (win, e) = ui::window_with("x");
     assert_eq!(point_size(&e), 45.0);
     ui::shortcut(&win, "=", CMD);
     assert_eq!(settings::zoom(), 3.0);
-    assert_eq!(footer(&e).status(), "Text size 300%");
+    assert_eq!(status(&e).text(), "Text size 300%");
     win.close();
 }
 
-fn status_clears_after_3s() {
+fn status_flash_clears_after_2s() {
     let (win, e) = ui::window_with("x");
-    footer(&e).set_status("hello");
-    ui::pump(2.5);
-    assert_eq!(footer(&e).status(), "hello");
-    footer(&e).set_status("again"); // a new status restarts the clock
-    ui::pump(2.0);
-    assert_eq!(footer(&e).status(), "again");
-    ui::pump(1.2);
-    assert_eq!(footer(&e).status(), "");
+    let s = status(&e);
+    assert!(!s.is_shown());
+    s.flash("hello");
+    ui::pump(1.5);
+    assert!(s.is_shown());
+    assert_eq!(s.text(), "hello");
+    s.flash("again"); // a new message restarts the clock
+    ui::pump(1.5);
+    assert_eq!(s.text(), "again");
+    ui::pump(0.8);
+    assert_eq!(s.text(), "");
+    assert!(!s.is_shown());
     win.close();
 }
 
@@ -796,26 +800,10 @@ fn zoom_applies_to_every_window() {
     }
     ui::shortcut(&w1, "-", CMD);
     assert!((point_size(&e2) - 15.0 * 0.9).abs() < 1e-9);
-    assert_eq!(footer(&e1).status(), "Text size 90%");
-    assert_eq!(footer(&e2).status(), "");
+    assert_eq!(status(&e1).text(), "Text size 90%");
+    assert_eq!(status(&e2).text(), "");
     w1.close();
     w2.close();
-}
-
-fn counts_words_after_debounce() {
-    let (win, e) = ui::window_with("");
-    ui::type_text(&win, "one two");
-    ui::pump(0.1);
-    assert_eq!(footer(&e).words(), 0, "debounced");
-    ui::pump(0.4);
-    assert_eq!(footer(&e).words(), 2);
-    assert_eq!(footer(&e).words_label(), "2 Words");
-    ui::key(&win, ui::BACKSPACE, NSEventModifierFlags::empty());
-    ui::key(&win, ui::BACKSPACE, NSEventModifierFlags::empty());
-    ui::key(&win, ui::BACKSPACE, NSEventModifierFlags::empty());
-    ui::pump(0.4);
-    assert_eq!(footer(&e).words_label(), "1 Word");
-    win.close();
 }
 
 fn change_font_stores_family() {
@@ -838,19 +826,6 @@ fn change_font_stores_family() {
     assert_eq!(settings::font_family(), "Menlo");
     assert_eq!(e.font().unwrap().familyName().unwrap().to_string(), "Menlo");
     assert_eq!(point_size(&e), 15.0 * 1.5, "size comes from the zoom");
-    panel.close();
-    win.close();
-}
-
-fn font_button_opens_panel() {
-    let (win, e) = ui::window_with("x");
-    let b = footer(&e).subviews().iter().find_map(|v| v.downcast::<NSButton>().ok()).expect("font button");
-    click(&b);
-    let panel = NSFontPanel::sharedFontPanel(mtm());
-    assert!(panel.isVisible());
-    panel.close();
-    ui::shortcut(&win, "t", CMD);
-    assert!(panel.isVisible(), "⌘T shows it too");
     panel.close();
     win.close();
 }
@@ -880,7 +855,7 @@ impl OnDisk {
         Some(self.doc.autosavedContentsFileURL()?.path()?.to_string().into())
     }
     fn status(&self) -> String {
-        self.doc.editor().unwrap().footer().unwrap().status()
+        self.doc.editor().unwrap().status().unwrap().text()
     }
     /// Types through the window and lets the run loop close the undo group.
     fn type_text(&self, s: &str) {
@@ -1375,9 +1350,9 @@ fn crlf_hold_blocks_autosave_until_save() {
 fn paused_status_outlives_transient_status() {
     on_disk("status", "a\r\n", |fx| {
         let editor = fx.doc.editor().unwrap();
-        editor.footer().unwrap().set_status("Text size 110%");
-        ui::pump(3.3);
-        assert_eq!(fx.status(), "Auto-save paused: line endings", "back after the 3 s message, and stays");
+        editor.status().unwrap().flash("Text size 110%");
+        ui::pump(2.3);
+        assert_eq!(fx.status(), "Auto-save paused: line endings", "back after the 2 s message, and stays");
     });
 }
 
@@ -1851,6 +1826,113 @@ fn kitchen_sink_is_well_formed() {
     assert!(total < 500_000, "assets total {total} bytes");
 }
 
+// ---- Chrome, status pill, fixed column ----
+
+fn hold_shows_status_pill() {
+    on_disk("pill", "a\r\nb", |fx| {
+        let pill = fx.doc.editor().unwrap().status().unwrap();
+        assert!(pill.is_shown());
+        assert_eq!(pill.text(), "Auto-save paused: line endings");
+        fx.type_text("x");
+        fx.save();
+        assert_eq!(fx.doc.hold(), None);
+        assert!(!pill.is_shown());
+    });
+}
+
+fn window_has_no_visible_titlebar() {
+    on_disk("titlebar", "a\n", |fx| {
+        assert!(fx.win.titlebarAppearsTransparent());
+        assert_eq!(fx.win.titleVisibility(), objc2_app_kit::NSWindowTitleVisibility::Hidden);
+        assert!(fx.win.styleMask().contains(objc2_app_kit::NSWindowStyleMask::FullSizeContentView));
+        assert!(fx.win.title().to_string().starts_with("doc"), "{}", fx.win.title());
+    });
+}
+
+/// The width of `columnWidth` zeros in the editor font, plus the padding on both sides.
+fn expected_column(e: &EditorView) -> f64 {
+    let attrs = objc2_foundation::NSDictionary::from_slices(&[unsafe { objc2_app_kit::NSFontAttributeName }], &[&*settings::current_font() as &AnyObject]);
+    let zeros = NSString::from_str(&"0".repeat(settings::column_width()));
+    // SAFETY: the font attribute's value is a font.
+    let w = unsafe { objc2_app_kit::NSStringDrawing::sizeWithAttributes(&*zeros, Some(&attrs)) }.width;
+    w + 2.0 * unsafe { e.textContainer() }.unwrap().lineFragmentPadding()
+}
+
+fn container_width(e: &EditorView) -> f64 {
+    unsafe { e.textContainer() }.unwrap().size().width
+}
+
+fn set_content_width(win: &objc2_app_kit::NSWindow, w: f64) {
+    let f = win.frame();
+    let content = win.contentRectForFrameRect(f);
+    win.setFrame_display(win.frameRectForContentRect(NSRect::new(content.origin, NSSize::new(w, content.size.height))), false);
+    ui::pump(0.05);
+}
+
+fn column_width_fixed() {
+    fresh_defaults();
+    let (win, e) = ui::window_with("x");
+    set_content_width(&win, 900.0);
+    let a = container_width(&e);
+    set_content_width(&win, 1600.0);
+    let b = container_width(&e);
+    assert_eq!(a, b);
+    assert!((a - expected_column(&e)).abs() <= 0.5, "{a} vs {}", expected_column(&e));
+    // Centred: equal space either side of the column.
+    let inset = e.textContainerInset().width;
+    let clip = e.enclosingScrollView().unwrap().contentSize().width;
+    assert!((inset * 2.0 + b - clip).abs() <= 1.0, "inset {inset}, clip {clip}");
+    win.close();
+}
+
+fn window_min_width_follows_column() {
+    fresh_defaults();
+    let (win, e) = ui::window_with("x");
+    let min = win.contentMinSize().width;
+    assert!(min >= container_width(&e) + 32.0, "{min}");
+    set_content_width(&win, min);
+    let before = win.frame().size.width;
+    ui::shortcut(&win, "=", CMD);
+    ui::pump(0.05);
+    assert!(win.frame().size.width > before, "{} vs {before}", win.frame().size.width);
+    assert!(win.contentMinSize().width > min);
+    win.close();
+    fresh_defaults();
+}
+
+fn restored_narrow_window_grows() {
+    fresh_defaults();
+    // ui::window_with builds a 600-pt window; the content view sets the minimum when it moves in.
+    let (win, _e) = ui::window_with("x");
+    let content = win.contentRectForFrameRect(win.frame()).size.width;
+    assert!(win.contentMinSize().width > 600.0);
+    assert!(content >= win.contentMinSize().width, "{content} < {}", win.contentMinSize().width);
+    win.close();
+}
+
+fn kitchen_sink_lines_fit_column() {
+    fresh_defaults();
+    let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../fixtures/kitchen-sink/kitchen-sink.md");
+    let text = std::fs::read_to_string(path).expect("fixture");
+    let (win, e) = ui::window_with(&text);
+    // SAFETY: plain getters of the editor's TextKit 1 chain.
+    let (lm, tc) = unsafe { (e.layoutManager().unwrap(), e.textContainer().unwrap()) };
+    lm.ensureLayoutForTextContainer(&tc);
+    let width = tc.size().width;
+    let glyphs = lm.numberOfGlyphs();
+    let (mut i, mut lines) = (0, 0);
+    while i < glyphs {
+        let mut r = NSRange::new(0, 0);
+        // SAFETY: `r` is a valid out pointer; `i` is a glyph index.
+        let used = unsafe { lm.lineFragmentUsedRectForGlyphAtIndex_effectiveRange(i, &mut r) };
+        assert!(used.size.width <= width + 0.01, "line at glyph {i}: {} > {width}", used.size.width);
+        i = r.end().max(i + 1);
+        lines += 1;
+    }
+    assert!(lines > 100, "{lines} lines");
+    win.close();
+}
+
 fn main() {
     register_bundled_fonts();
     let app = NSApplication::sharedApplication(mtm());
@@ -1903,12 +1985,10 @@ fn main() {
         ("missing_font_falls_back", missing_font_falls_back),
         ("default_font_is_jetbrains_mono_15", default_font_is_jetbrains_mono_15),
         ("zoom_in_changes_point_size", zoom_in_changes_point_size),
-        ("zoom_status_at_limit", zoom_status_at_limit),
-        ("status_clears_after_3s", status_clears_after_3s),
+        ("zoom_flashes_text_size", zoom_flashes_text_size),
+        ("status_flash_clears_after_2s", status_flash_clears_after_2s),
         ("zoom_applies_to_every_window", zoom_applies_to_every_window),
-        ("counts_words_after_debounce", counts_words_after_debounce),
         ("change_font_stores_family", change_font_stores_family),
-        ("font_button_opens_panel", font_button_opens_panel),
         ("own_write_ignored", own_write_ignored),
         ("clean_doc_reloads_silently", clean_doc_reloads_silently),
         ("edited_doc_holds", edited_doc_holds),
@@ -1951,6 +2031,12 @@ fn main() {
         ("paste_undoes_alone", paste_undoes_alone),
         ("glass_and_webkit_available", glass_and_webkit_available),
         ("kitchen_sink_is_well_formed", kitchen_sink_is_well_formed),
+        ("hold_shows_status_pill", hold_shows_status_pill),
+        ("window_has_no_visible_titlebar", window_has_no_visible_titlebar),
+        ("column_width_fixed", column_width_fixed),
+        ("window_min_width_follows_column", window_min_width_follows_column),
+        ("restored_narrow_window_grows", restored_narrow_window_grows),
+        ("kitchen_sink_lines_fit_column", kitchen_sink_lines_fit_column),
     ];
     let mut failed = 0;
     for (name, f) in tests {

@@ -1,12 +1,13 @@
 pub mod app_delegate;
+pub mod content;
 pub mod document;
 pub mod editor;
 pub mod export;
 pub mod find_bar;
-pub mod footer;
 pub mod glass;
 pub mod menu;
 pub mod settings;
+pub mod status;
 pub mod styler;
 pub mod theme;
 pub mod util;

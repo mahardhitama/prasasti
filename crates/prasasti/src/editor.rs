@@ -1,13 +1,12 @@
 use std::cell::{Cell, Ref, RefCell};
 use std::ptr::NonNull;
 
-use block2::RcBlock;
 use objc2::rc::{Retained, Weak};
 use objc2::runtime::{AnyObject, ProtocolObject};
 use objc2::{AnyThread, DefinedClass, MainThreadOnly, define_class, msg_send};
 use objc2_app_kit::{
     NSAppearanceCustomization, NSAppearanceNameAqua, NSAppearanceNameDarkAqua,
-    NSAutoresizingMaskOptions, NSBackgroundColorAttributeName, NSEvent, NSEventModifierFlags, NSFont,
+    NSAutoresizingMaskOptions, NSBackgroundColorAttributeName, NSFontAttributeName, NSStringDrawing, NSEvent, NSEventModifierFlags, NSFont,
     NSFontManager,
     NSForegroundColorAttributeName, NSGlyphProperty, NSLayoutManager, NSLayoutManagerDelegate,
     NSPasteboard, NSPasteboardTypeString, NSResponder, NSScrollView, NSText, NSTextContainer,
@@ -16,8 +15,7 @@ use objc2_app_kit::{
 };
 
 use objc2_foundation::{
-    MainThreadMarker, NSArray, NSDictionary, NSInteger, NSNotification, NSNotificationCenter, NSObject,
-    NSNotFound, NSObjectProtocol, NSPoint, NSRange, NSRect, NSSize, NSString, NSUInteger,
+    MainThreadMarker, NSArray, NSDictionary, NSInteger, NSNotification, NSObject, NSNotFound, NSObjectProtocol, NSPoint, NSRange, NSRect, NSSize, NSString, NSUInteger,
 };
 
 use prasasti_core::edit::{self, Edit};
@@ -26,11 +24,11 @@ use prasasti_core::list;
 use prasasti_core::zoom;
 
 use crate::find_bar::FindBar;
-use crate::footer::Footer;
+use crate::status::StatusPill;
 use crate::settings;
 use crate::styler::{Styler, hidden_key};
 use crate::theme::{Palette, base_font, palette};
-use crate::util::{guarded, to_u16};
+use crate::util::{Observer, guarded, observe, to_u16};
 
 pub struct Ivars {
     /// The view does not retain its storage (the storage owns the layout
@@ -42,22 +40,13 @@ pub struct Ivars {
     pal: RefCell<Palette>,
     /// The window's find bar, which repaints its matches after edits.
     find_bar: RefCell<Weak<FindBar>>,
-    footer: RefCell<Weak<Footer>>,
+    status: RefCell<Weak<StatusPill>>,
     /// The font the styler uses, from the settings as of the last restyle.
     font: RefCell<Retained<NSFont>>,
     /// ⌘-scroll lines not yet turned into a zoom step.
     wheel: Cell<f64>,
-    /// The settings-changed observation, removed when the editor goes.
-    observer: RefCell<Option<Observer>>,
-}
-
-struct Observer(Retained<ProtocolObject<dyn NSObjectProtocol>>);
-
-impl Drop for Observer {
-    fn drop(&mut self) {
-        // SAFETY: the token came from this centre's addObserverForName:….
-        unsafe { NSNotificationCenter::defaultCenter().removeObserver(self.0.as_ref()) };
-    }
+    /// Settings and clip-frame observations, removed when the editor goes.
+    observers: RefCell<Vec<Observer>>,
 }
 
 define_class!(
@@ -85,9 +74,6 @@ define_class!(
             guarded(|| styler.restyle_edit(storage, &font, &pal, range, range.end()));
             if let Some(bar) = self.find_bar() {
                 guarded(|| bar.text_changed());
-            }
-            if let Some(footer) = self.footer() {
-                footer.text_changed();
             }
         }
     }
@@ -238,8 +224,8 @@ define_class!(
             // The whole document, whatever is selected.
             guarded(|| {
                 crate::export::copy_as_html(&NSPasteboard::generalPasteboard(), &self.string().to_string());
-                if let Some(footer) = self.footer() {
-                    footer.set_status("Copied as HTML.");
+                if let Some(status) = self.status() {
+                    status.flash("Copied as HTML.");
                 }
             });
         }
@@ -338,6 +324,9 @@ fn wheel_step(pending: f64, lines: f64) -> (f64, i32) {
     if sum.abs() >= 1.0 { (0.0, sum.signum() as i32) } else { (sum, 0) }
 }
 
+/// The editor's least horizontal inset on each side.
+const COLUMN_SIDE: f64 = 16.0;
+
 fn range_of(r: NSRange) -> std::ops::Range<usize> {
     r.location..r.end()
 }
@@ -355,12 +344,46 @@ impl EditorView {
         *self.ivars().find_bar.borrow_mut() = Weak::new(bar);
     }
 
-    pub fn footer(&self) -> Option<Retained<Footer>> {
-        self.ivars().footer.borrow().load()
+    pub fn status(&self) -> Option<Retained<StatusPill>> {
+        self.ivars().status.borrow().load()
     }
 
-    pub fn set_footer(&self, footer: &Footer) {
-        *self.ivars().footer.borrow_mut() = Weak::new(footer);
+    pub fn set_status_pill(&self, status: &StatusPill) {
+        *self.ivars().status.borrow_mut() = Weak::new(status);
+    }
+
+    /// The text container width for `columnWidth` characters of the editor
+    /// font ('0' advances), plus the line fragment padding on both sides.
+    pub fn column_pts(&self) -> f64 {
+        // SAFETY: a plain getter; the editor is built with a container.
+        let pad = unsafe { self.textContainer() }.map_or(0.0, |c| c.lineFragmentPadding());
+        let font = settings::current_font();
+        let attrs = NSDictionary::from_slices(&[unsafe { NSFontAttributeName }], &[&*font as &AnyObject]);
+        let zeros = NSString::from_str(&"0".repeat(settings::column_width()));
+        // SAFETY: the font attribute's value is a font.
+        unsafe { zeros.sizeWithAttributes(Some(&attrs)) }.width + 2.0 * pad
+    }
+
+    /// Fixes the container at the column width and centres it in the scroll
+    /// view. Narrower only when the window is capped at the screen (huge zoom).
+    pub fn column_layout(&self) {
+        let Some(scroll) = self.enclosingScrollView() else { return };
+        // SAFETY: a plain getter; the editor is built with a container.
+        let Some(container) = (unsafe { self.textContainer() }) else { return };
+        let avail = scroll.contentSize().width;
+        if avail <= 2.0 * COLUMN_SIDE {
+            return; // not laid out yet
+        }
+        let width = self.column_pts().min(avail - 2.0 * COLUMN_SIDE);
+        let size = NSSize::new(width, f64::MAX);
+        if container.size() != size {
+            container.setSize(size);
+        }
+        let old = self.textContainerInset();
+        let inset = NSSize::new(((avail - width) / 2.0).max(COLUMN_SIDE), old.height);
+        if old != inset {
+            self.setTextContainerInset(inset);
+        }
     }
 
     /// One zoom step in `direction`, or back to 100% for 0. The status shows
@@ -369,8 +392,8 @@ impl EditorView {
         guarded(|| {
             let z = if direction == 0 { 1.0 } else { zoom::step(settings::zoom(), direction) };
             settings::set_zoom(z);
-            if let Some(footer) = self.footer() {
-                footer.set_status(&format!("Text size {}%", (z * 100.0).round()));
+            if let Some(status) = self.status() {
+                status.flash(&format!("Text size {}%", (z * 100.0).round()));
             }
         });
     }
@@ -453,7 +476,8 @@ pub fn make_editor(frame: NSRect) -> Retained<EditorView> {
         NSTextContainer::alloc(),
         NSSize::new(frame.size.width, f64::MAX),
     );
-    container.setWidthTracksTextView(true);
+    // The width is the column's, set by column_layout.
+    container.setWidthTracksTextView(false);
     layout.addTextContainer(&container);
 
     let this = EditorView::alloc(mtm).set_ivars(Ivars {
@@ -462,10 +486,10 @@ pub fn make_editor(frame: NSRect) -> Retained<EditorView> {
         caret: Cell::new(0),
         pal: RefCell::new(palette(false)),
         find_bar: RefCell::default(),
-        footer: RefCell::default(),
+        status: RefCell::default(),
         font: RefCell::new(base_font()),
         wheel: Cell::new(0.0),
-        observer: RefCell::default(),
+        observers: RefCell::default(),
     });
     // SAFETY: designated initializer of NSTextView with matching argument types.
     let editor: Retained<EditorView> =
@@ -489,22 +513,14 @@ pub fn make_editor(frame: NSRect) -> Retained<EditorView> {
     editor.setDelegate(Some(ProtocolObject::from_ref(&*editor)));
     editor.apply_theme();
     let weak = Weak::new(&*editor);
-    let restyle = RcBlock::new(move |_: NonNull<NSNotification>| {
+    // Settings are only changed on the main thread, where the editor lives.
+    let restyle = observe(settings::CHANGED, None, move || {
         if let Some(e) = weak.load() {
-            guarded(|| e.apply_theme());
+            e.apply_theme();
+            e.column_layout();
         }
     });
-    // SAFETY: no queue means the block runs on the posting thread, and the
-    // settings are only changed on the main thread, where the editor lives.
-    let token = unsafe {
-        NSNotificationCenter::defaultCenter().addObserverForName_object_queue_usingBlock(
-            Some(&NSString::from_str(settings::CHANGED)),
-            None,
-            None,
-            &restyle,
-        )
-    };
-    *editor.ivars().observer.borrow_mut() = Some(Observer(token));
+    editor.ivars().observers.borrow_mut().push(restyle);
     editor
 }
 
@@ -518,6 +534,18 @@ pub fn editor_in_scroll(frame: NSRect) -> (Retained<NSScrollView>, Retained<Edit
     );
     let editor = make_editor(NSRect::new(NSPoint::new(0.0, 0.0), scroll.contentSize()));
     scroll.setDocumentView(Some(&editor));
+    let clip = scroll.contentView();
+    clip.setPostsFrameChangedNotifications(true);
+    let weak = Weak::new(&*editor);
+    // SAFETY: NSViewFrameDidChangeNotification is a constant string.
+    let name = unsafe { objc2_app_kit::NSViewFrameDidChangeNotification }.to_string();
+    let resized = observe(&name, Some(&clip), move || {
+        if let Some(e) = weak.load() {
+            e.column_layout();
+        }
+    });
+    editor.ivars().observers.borrow_mut().push(resized);
+    editor.column_layout();
     (scroll, editor)
 }
 
