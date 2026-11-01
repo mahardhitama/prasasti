@@ -9,7 +9,7 @@ use objc2::AnyThread;
 use objc2::runtime::{AnyObject, Bool, Sel};
 use objc2::{DefinedClass, MainThreadOnly, Message, define_class, msg_send, sel};
 use objc2_app_kit::{
-    NSAlert, NSAlertFirstButtonReturn, NSAttributedStringAppKitDocumentFormats, NSColor, NSForegroundColorAttributeName, NSLayoutManager, NSPrintInfo, NSPrintOperation, NSTextContainer, NSTextStorage, NSTextView, NSAlertSecondButtonReturn, NSBackingStoreType, NSDocument,
+    NSAlert, NSAlertFirstButtonReturn, NSFont, NSFontAttributeName, NSFontManager, NSAttributedStringAppKitDocumentFormats, NSColor, NSForegroundColorAttributeName, NSLayoutManager, NSPrintInfo, NSPrintOperation, NSTextContainer, NSTextStorage, NSTextView, NSAlertSecondButtonReturn, NSBackingStoreType, NSDocument,
     NSDocumentChangeType, NSLayoutAttribute, NSModalResponse, NSSaveOperationType, NSStackView,
     NSUserInterfaceLayoutOrientation, NSView, NSWindow, NSWindowController, NSWindowStyleMask,
 };
@@ -193,9 +193,7 @@ define_class!(
 
         #[unsafe(method_id(dataOfType:error:))]
         fn data_of_type(&self, _type_name: &NSString, _error: *mut *mut NSError) -> Retained<NSData> {
-            let text = self.text().to_string();
-            // Always UTF-8 with LF, even if CRs were pasted in.
-            let bytes = guarded(|| normalize_newlines(&text).into_bytes()).unwrap_or(text.into_bytes());
+            let bytes = self.file_bytes();
             let data = NSData::with_bytes(&bytes);
             *self.ivars().pending.borrow_mut() = Some(bytes);
             if let Some(f) = AFTER_SNAPSHOT.with(|h| h.borrow_mut().take()) {
@@ -371,6 +369,12 @@ impl PrasastiDocument {
         }
     }
 
+    /// The bytes a save writes: always UTF-8 with LF, even if CRs were pasted in.
+    fn file_bytes(&self) -> Vec<u8> {
+        let text = self.text().to_string();
+        guarded(|| normalize_newlines(&text).into_bytes()).unwrap_or(text.into_bytes())
+    }
+
     pub fn hold(&self) -> Option<HoldReason> {
         self.ivars().autosave_hold.get()
     }
@@ -474,29 +478,31 @@ impl PrasastiDocument {
         }
     }
 
-    /// Writes the text to a recovery draft in ~/Library/Autosave Information
-    /// (AppKit's autosave-elsewhere), never to the file itself.
+    /// Writes the text to a recovery draft in ~/Library/Autosave Information,
+    /// never to the file itself, and points autosavedContentsFileURL at it.
     fn write_draft(&self, done: impl Fn(*mut NSError) + 'static) {
-        // A fresh name each time: rewriting the existing draft makes NSDocument
-        // refuse with "changed by another application" once the file changed.
-        let (Some(url), Some(kind)) = (self.new_draft_url(), self.fileType()) else {
-            return done(ptr::null_mut());
-        };
+        // Written directly, not with AppKit's autosave-elsewhere: for a document
+        // opened from a file, AppKit first preserves a version of the (not yet
+        // existing) draft and fails with 512, so no draft was ever written.
+        // A fresh name each time keeps the previous draft intact until this one lands.
+        let Some(url) = self.new_draft_url() else { return done(ptr::null_mut()) };
+        let Some(path) = url.path().map(|p| p.to_string()) else { return done(ptr::null_mut()) };
+        if let Err(e) = std::fs::write(&path, self.file_bytes()) {
+            let _ = std::fs::remove_file(&path);
+            let err = error_with(&format!("The recovery draft couldn't be written: {e}"));
+            return done(Retained::as_ptr(&err) as *mut NSError);
+        }
         let replaced = self.autosavedContentsFileURL().and_then(|u| u.path()).map(|p| p.to_string());
-        let this = self.retain();
-        let done = RcBlock::new(move |err: *mut NSError| {
-            if err.is_null() {
-                guarded(|| {
-                    // Keep the newest two: the previous one goes only now.
-                    if let Some(oldest) = this.ivars().previous_draft.replace(replaced.clone()) {
-                        this.remove_draft(&oldest);
-                    }
-                    this.invalidateRestorableState();
-                });
+        self.setAutosavedContentsFileURL(Some(&url));
+        self.updateChangeCount(NSDocumentChangeType::ChangeAutosaved);
+        guarded(|| {
+            // Keep the newest two: the previous one goes only now.
+            if let Some(oldest) = self.ivars().previous_draft.replace(replaced) {
+                self.remove_draft(&oldest);
             }
-            done(err);
+            self.invalidateRestorableState();
         });
-        self.saveToURL_ofType_forSaveOperation_completionHandler(&url, &kind, NSSaveOperationType::AutosaveElsewhereOperation, &done);
+        done(ptr::null_mut());
     }
 
     fn new_draft_url(&self) -> Option<Retained<NSURL>> {
@@ -642,6 +648,9 @@ impl PrasastiDocument {
         // SAFETY: the dictionary is mutable and `settings` holds print attributes.
         unsafe { info.dictionary().addEntriesFromDictionary(settings) };
         let width = info.paperSize().width - info.leftMargin() - info.rightMargin();
+        // Text starts at the top-left of the page, not centred on it.
+        info.setVerticallyCentered(false);
+        info.setHorizontallyCentered(false);
 
         let html = crate::export::print_html(&self.text().to_string(), &crate::settings::font_family());
         let data = NSData::with_bytes(html.as_bytes());
@@ -669,6 +678,8 @@ impl PrasastiDocument {
         storage.setAttributedString(&rendered);
         // HTML leaves default-black runs without a colour, and the default text colour follows Dark Mode.
         black_where_unset(&storage);
+        // The importer can't see the bundled font (Plex prints as Times).
+        editor_family(&storage, mtm);
         // Lay out to the full height now, so pagination sees the real length.
         layout.ensureLayoutForTextContainer(&container);
         view.sizeToFit();
@@ -788,6 +799,26 @@ fn black_where_unset(storage: &NSTextStorage) {
             let mut run = NSRange::new(0, 0);
             if storage.attribute_atIndex_effectiveRange(key, at, &mut run).is_none() {
                 storage.addAttribute_value_range(key, &black, run);
+            }
+            at = run.end().max(at + 1);
+        }
+    }
+}
+
+/// Converts every font run to the editor's family, keeping size and traits;
+/// a run the family can't render keeps its font.
+fn editor_family(storage: &NSTextStorage, mtm: MainThreadMarker) {
+    let Some(family) = crate::theme::base_font().familyName() else { return };
+    let manager = NSFontManager::sharedFontManager(mtm);
+    // SAFETY: the key is AppKit's constant; every range comes from `attribute:atIndex:effectiveRange:`.
+    unsafe {
+        let key = NSFontAttributeName;
+        let mut at = 0;
+        while at < storage.length() {
+            let mut run = NSRange::new(0, 0);
+            let font = storage.attribute_atIndex_effectiveRange(key, at, &mut run).and_then(|f| f.downcast::<NSFont>().ok());
+            if let Some(font) = font {
+                storage.addAttribute_value_range(key, &manager.convertFont_toFamily(&font, &family), run);
             }
             at = run.end().max(at + 1);
         }

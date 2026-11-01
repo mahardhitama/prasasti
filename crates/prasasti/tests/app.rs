@@ -410,6 +410,30 @@ fn print_operation_builds() {
     assert_eq!(tv.backgroundColor(), objc2_app_kit::NSColor::whiteColor());
 }
 
+/// Print uses the editor's font family (the HTML importer alone falls back to
+/// Times), keeps bold, and starts at the top of the page.
+fn print_uses_editor_font_top_aligned() {
+    let d = doc_from(b"# Head\n\nbody **bold** `code`\n");
+    let (op, tv) = print_view(&d);
+    let family = base_font().familyName().expect("editor family").to_string();
+    // SAFETY: a plain getter.
+    let storage = unsafe { tv.textStorage() }.unwrap();
+    let mut at = 0;
+    while at < storage.length() {
+        let mut run = NSRange::new(0, 0);
+        // SAFETY: NSFontAttributeName is AppKit's key; `at` is in bounds.
+        let font = unsafe { storage.attribute_atIndex_effectiveRange(objc2_app_kit::NSFontAttributeName, at, &mut run) };
+        let font: Retained<NSFont> = font.expect("a font").downcast().ok().expect("an NSFont");
+        assert_eq!(font.familyName().map(|f| f.to_string()), Some(family.clone()), "at {at}");
+        at = run.end().max(at + 1);
+    }
+    let s = storage.string().to_string();
+    let bold_at = s.find("bold").unwrap();
+    assert!(is_bold(&storage, s[..bold_at].encode_utf16().count()), "bold kept");
+    assert!(!op.printInfo().isVerticallyCentered(), "top-aligned");
+    assert!(!op.printInfo().isHorizontallyCentered());
+}
+
 fn find_bar(e: &EditorView) -> Retained<FindBar> {
     e.find_bar().expect("editor has a find bar")
 }
@@ -1527,6 +1551,49 @@ fn presenter_reloads_clean_doc() {
     });
 }
 
+/// As in the app: opened from its file and owned by the document controller.
+/// A held document must still write a recovery draft holding the local text.
+fn held_controller_doc_writes_draft() {
+    let dir = std::env::temp_dir().join(format!("prasasti-held-ctl-{}-{}", std::process::id(), std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_nanos()));
+    std::fs::create_dir_all(&dir).unwrap();
+    let path = dir.join("doc.md");
+    std::fs::write(&path, "a\r\nb").unwrap();
+    let sheets = document::SHEETS_ENABLED.swap(false, std::sync::atomic::Ordering::SeqCst);
+    let drafts_before = draft_names();
+    let url = NSURL::fileURLWithPath(&NSString::from_str(path.to_str().unwrap()));
+    // SAFETY: NSDocument's initializer for opening a file, as the controller calls it.
+    let doc: Result<Retained<PrasastiDocument>, Retained<NSError>> = unsafe {
+        objc2::msg_send![<PrasastiDocument as objc2::MainThreadOnly>::alloc(mtm()), initWithContentsOfURL: &*url, ofType: ns_string!(MD), error: _]
+    };
+    let doc = doc.expect("open");
+    let dc = objc2_app_kit::NSDocumentController::sharedDocumentController(mtm());
+    dc.addDocument(&doc);
+    doc.makeWindowControllers();
+    let win = doc.windowControllers().firstObject().and_then(|c| c.window()).expect("window");
+    let r = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        assert_eq!(doc.hold(), Some(HoldReason::LineEndings));
+        doc.editor().unwrap().setSelectedRange(NSRange::new(0, 0));
+        ui::type_text(&win, "mine ");
+        ui::pump(0.05);
+        let err = std::rc::Rc::new(std::cell::RefCell::new(None));
+        let e2 = err.clone();
+        let done = block2::RcBlock::new(move |e: *mut NSError| {
+            *e2.borrow_mut() = Some(unsafe { e.as_ref() }.map(|e| format!("{:?}", e.description())));
+        });
+        doc.autosaveWithImplicitCancellability_completionHandler(true, &done);
+        wait_until(|| err.borrow().is_some());
+        assert_eq!(err.borrow().clone().unwrap(), None, "draft write failed");
+        let draft: std::path::PathBuf = doc.autosavedContentsFileURL().and_then(|u| u.path()).expect("a recovery draft while held").to_string().into();
+        assert_eq!(std::fs::read_to_string(&draft).unwrap(), "mine a\nb");
+        assert_eq!(std::fs::read(&path).unwrap(), b"a\r\nb", "the original is untouched");
+    }));
+    doc.close();
+    remove_new_drafts(&drafts_before);
+    document::SHEETS_ENABLED.store(sheets, std::sync::atomic::Ordering::SeqCst);
+    let _ = std::fs::remove_dir_all(&dir);
+    r.unwrap_or_else(|e| std::panic::resume_unwind(e))
+}
+
 fn main() {
     let app = NSApplication::sharedApplication(mtm());
     // Pin the light (Aqua) appearance before any window: colour assertions use
@@ -1561,6 +1628,7 @@ fn main() {
         ("paste_normalizes_crlf", paste_normalizes_crlf),
         ("copy_as_html_writes_both_types", copy_as_html_writes_both_types),
         ("print_operation_builds", print_operation_builds),
+        ("print_uses_editor_font_top_aligned", print_uses_editor_font_top_aligned),
         ("paints_matches", paints_matches),
         ("return_steps_matches", return_steps_matches),
         ("replace_all_one_undo", replace_all_one_undo),
@@ -1612,6 +1680,7 @@ fn main() {
         ("close_dialog_save_checks_disk", close_dialog_save_checks_disk),
         ("save_op_cancels_when_disk_changed", save_op_cancels_when_disk_changed),
         ("recheck_after_keep_mine_stays_quiet", recheck_after_keep_mine_stays_quiet),
+        ("held_controller_doc_writes_draft", held_controller_doc_writes_draft),
     ];
     let mut failed = 0;
     for (name, f) in tests {

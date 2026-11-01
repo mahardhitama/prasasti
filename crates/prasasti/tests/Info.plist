@@ -1,0 +1,12 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+	<!-- A bundle identifier turns on AppKit's version preservation, as in the app;
+	     its own id keeps the tests out of the app's defaults domain. -->
+	<key>CFBundleIdentifier</key>
+	<string>com.mahardhitama.prasasti.tests</string>
+	<key>CFBundleName</key>
+	<string>PrasastiTests</string>
+</dict>
+</plist>

@@ -7,4 +7,9 @@ fn main() {
         "cargo:rustc-link-arg-bin=prasasti=-Wl,-sectcreate,__TEXT,__info_plist,{}",
         plist.display()
     );
+
+    // The test binary gets its own bundle identity, so saving behaves as in the app.
+    let tests = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/Info.plist");
+    println!("cargo:rerun-if-changed={}", tests.display());
+    println!("cargo:rustc-link-arg-tests=-Wl,-sectcreate,__TEXT,__info_plist,{}", tests.display());
 }
