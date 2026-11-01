@@ -299,12 +299,13 @@ impl PrasastiDocument {
     /// Reopened from a recovery draft: the draft was written because autosave
     /// was held, so hold it again, judged against the original file.
     fn recovered_from_draft(&self) {
-        let original = self.path().map(std::fs::read);
-        let (hold, known) = match original {
-            Some(Ok(bytes)) if bytes.contains(&b'\r') => (HoldReason::LineEndings, Some(bytes)),
-            Some(Ok(bytes)) => (HoldReason::ExternalChange, Some(bytes)),
-            Some(Err(e)) if e.kind() == std::io::ErrorKind::NotFound => (HoldReason::Deleted, None),
-            _ => (HoldReason::ExternalChange, None),
+        // Untitled restore and Duplicate also read other contents: no file, no hold.
+        let Some(path) = self.path() else { return };
+        let (hold, known) = match std::fs::read(&path) {
+            Ok(bytes) if bytes.contains(&b'\r') => (HoldReason::LineEndings, Some(bytes)),
+            Ok(bytes) => (HoldReason::ExternalChange, Some(bytes)),
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => (HoldReason::Deleted, None),
+            Err(_) => (HoldReason::ExternalChange, None),
         };
         *self.ivars().last_known.borrow_mut() = known;
         self.set_hold(Some(hold));

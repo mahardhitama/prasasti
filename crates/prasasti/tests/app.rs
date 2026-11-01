@@ -1033,6 +1033,73 @@ fn autosave_doc(doc: &PrasastiDocument) {
     wait_until(|| done.get());
 }
 
+/// Untitled-window restore and File > Duplicate: initForURL:nil withContentsOfURL:<draft>.
+fn untitled_draft_has_no_hold() {
+    let dir = std::env::temp_dir().join(format!("prasasti-untitled-{}-{}", std::process::id(), std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_nanos()));
+    std::fs::create_dir_all(&dir).unwrap();
+    let draft = dir.join("draft.md");
+    std::fs::write(&draft, "mine\n").unwrap();
+    let draft_url = NSURL::fileURLWithPath(&NSString::from_str(draft.to_str().unwrap()));
+    // SAFETY: NSDocument's initializer for reopening autosaved contents.
+    let doc: Result<Retained<PrasastiDocument>, Retained<NSError>> = unsafe {
+        objc2::msg_send![<PrasastiDocument as objc2::MainThreadOnly>::alloc(mtm()), initForURL: None::<&NSURL>, withContentsOfURL: &*draft_url, ofType: ns_string!(MD), error: _]
+    };
+    let doc = doc.expect("reopen untitled draft");
+    let r = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        assert_eq!(doc.fileURL(), None);
+        assert_eq!(doc.text().to_string(), "mine\n");
+        assert_eq!(doc.hold(), None, "no recovery hold without a file");
+        let failed = std::rc::Rc::new(std::cell::Cell::new(None));
+        let f = failed.clone();
+        let done = block2::RcBlock::new(move |e: *mut NSError| f.set(Some(!e.is_null())));
+        doc.autosaveWithImplicitCancellability_completionHandler(true, &done);
+        wait_until(|| failed.get().is_some());
+        assert_eq!(failed.get(), Some(false), "autosave works normally");
+    }));
+    if let Some(p) = doc.autosavedContentsFileURL().and_then(|u| u.path()) {
+        let p = std::path::PathBuf::from(p.to_string());
+        if p.starts_with(drafts_dir()) {
+            let _ = std::fs::remove_file(p);
+        }
+    }
+    doc.close();
+    let _ = std::fs::remove_dir_all(&dir);
+    r.unwrap_or_else(|e| std::panic::resume_unwind(e))
+}
+
+/// ⌘N: the document controller's `initWithType:error:` must leave working ivars.
+fn init_with_type_has_ivars() {
+    // SAFETY: NSDocument's initializer for a new untitled document.
+    let doc: Result<Retained<PrasastiDocument>, Retained<NSError>> = unsafe {
+        objc2::msg_send![<PrasastiDocument as objc2::MainThreadOnly>::alloc(mtm()), initWithType: ns_string!(MD), error: _]
+    };
+    let doc = doc.expect("new document");
+    assert_eq!(doc.hold(), None);
+    assert_eq!(doc.text().to_string(), "");
+    doc.readFromData_ofType_error(&NSData::with_bytes(b"typed\n"), ns_string!(MD)).expect("set text");
+    assert_eq!(doc.text().to_string(), "typed\n");
+    doc.close();
+}
+
+/// Open: the document controller's `initWithContentsOfURL:ofType:error:`.
+fn init_with_contents_has_ivars() {
+    on_disk("init-contents", "x", |fx| {
+        let url = fx.doc.fileURL().unwrap();
+        // SAFETY: NSDocument's initializer for opening a file.
+        let doc: Result<Retained<PrasastiDocument>, Retained<NSError>> = unsafe {
+            objc2::msg_send![<PrasastiDocument as objc2::MainThreadOnly>::alloc(mtm()), initWithContentsOfURL: &*url, ofType: ns_string!(MD), error: _]
+        };
+        let doc = doc.expect("open");
+        assert_eq!(doc.text().to_string(), "x");
+        assert_eq!(doc.hold(), None);
+        assert!(!doc.isDocumentEdited());
+        doc.readFromData_ofType_error(&NSData::with_bytes(b"a\r\nb"), ns_string!(MD)).expect("set text");
+        assert_eq!(doc.text().to_string(), "a\nb");
+        assert_eq!(doc.hold(), Some(HoldReason::LineEndings));
+        doc.close();
+    });
+}
+
 fn recovered_draft_keeps_hold() {
     let cases: [(&str, Option<&[u8]>, HoldReason); 3] = [
         ("rec-crlf", Some(b"a\r\nb"), HoldReason::LineEndings),
@@ -1317,6 +1384,9 @@ fn main() {
         ("sheet_keep_mine_button", sheet_keep_mine_button),
         ("deleted_sheet_save_writes_back", deleted_sheet_save_writes_back),
         ("recovered_draft_keeps_hold", recovered_draft_keeps_hold),
+        ("untitled_draft_has_no_hold", untitled_draft_has_no_hold),
+        ("init_with_type_has_ivars", init_with_type_has_ivars),
+        ("init_with_contents_has_ivars", init_with_contents_has_ivars),
         ("drafts_rotate_keeping_two", drafts_rotate_keeping_two),
         ("hold_change_replaces_sheet", hold_change_replaces_sheet),
         ("presenter_reloads_clean_doc", presenter_reloads_clean_doc),
