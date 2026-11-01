@@ -198,8 +198,9 @@ define_class!(
             .into();
             // A restored frame may be narrower than the column.
             content.update_min_width();
-            content.set_mode(if self.ivars().read_from_disk.get() { Mode::Preview } else { Mode::Edit });
             self.addWindowController(&controller);
+            // After the controller: Preview resolves image paths against this document's folder.
+            content.set_mode(if self.ivars().read_from_disk.get() { Mode::Preview } else { Mode::Edit });
             *self.ivars().editor.borrow_mut() = Some(editor);
             self.set_hold(self.hold());
         }

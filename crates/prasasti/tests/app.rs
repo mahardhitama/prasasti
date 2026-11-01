@@ -19,6 +19,7 @@ use prasasti::content::{DocumentView, Mode};
 use prasasti::document::{self, HoldReason, PrasastiDocument};
 use prasasti::editor::{EditorView, make_editor};
 use prasasti::find_bar::FindBar;
+use prasasti::preview::PreviewView;
 use prasasti::status::StatusPill;
 use prasasti::settings;
 use prasasti::styler::{Styler, hidden_key};
@@ -2148,13 +2149,8 @@ fn preview_ignores_typing_and_edit_commands() {
     ui::type_text(&win, "zz");
     assert!(!ui::enabled(&win, "b", CMD), "formatting is disabled in Preview");
     assert!(!ui::enabled(&win, "z", CMD), "undo is disabled in Preview");
-    with_clipboard("PASTED", || {
-        for k in ["b", "v", "z", "x"] {
-            if ui::enabled(&win, k, CMD) {
-                ui::shortcut(&win, k, CMD);
-            }
-        }
-    });
+    assert!(!ui::enabled(&win, "v", CMD), "paste is disabled in Preview");
+    assert!(!ui::enabled(&win, "x", CMD), "cut is disabled in Preview");
     ui::key(&win, "\t", NSEventModifierFlags::empty());
     ui::pump(0.2);
     assert_eq!(e.string().to_string(), before);
@@ -2221,6 +2217,88 @@ fn view_menu_checks_active_mode() {
     v.set_mode(Mode::Preview);
     assert_eq!((state(&preview), state(&edit)), (true, false));
     win.close();
+}
+
+/// A temp copy of the kitchen-sink fixture folder (the caller removes it).
+fn kitchen_sink_copy(name: &str) -> std::path::PathBuf {
+    fn copy_dir(from: &std::path::Path, to: &std::path::Path) {
+        std::fs::create_dir_all(to).unwrap();
+        for e in std::fs::read_dir(from).unwrap().flatten() {
+            let (src, dst) = (e.path(), to.join(e.file_name()));
+            if src.is_dir() { copy_dir(&src, &dst) } else { std::fs::copy(&src, &dst).unwrap(); }
+        }
+    }
+    let dir = std::env::temp_dir().join(format!("prasasti-ks-{name}-{}", std::process::id()));
+    copy_dir(&std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../fixtures/kitchen-sink"), &dir);
+    dir
+}
+
+/// Pumps until `js` evaluates to `want` in the preview; panics after `secs`.
+fn wait_for_js(web: &PreviewView, js: &str, want: &str, secs: f64) {
+    let start = Instant::now();
+    loop {
+        let got = web.eval(js, 1.0);
+        if got.as_deref() == Some(want) {
+            return;
+        }
+        assert!(start.elapsed().as_secs_f64() < secs, "{js} is {got:?}, not {want:?}");
+        ui::pump(0.05);
+    }
+}
+
+fn kitchen_sink_renders() {
+    let dir = kitchen_sink_copy("render");
+    let doc = disk_doc(&dir.join("kitchen-sink.md"));
+    doc.makeWindowControllers();
+    let v = content_of(&document_window(&doc));
+    assert_eq!(v.mode(), Mode::Preview);
+    let web = v.preview().expect("preview");
+    wait_for_js(&web, "String(document.body && document.body.dataset.rendered)", "1", 10.0);
+    let js = |s: &str| web.eval(s, 5.0).unwrap_or_default();
+    assert_ne!(js("String(document.querySelectorAll('.katex').length)"), "0", "KaTeX rendered");
+    assert_eq!(js("String(document.querySelectorAll('.mermaid > svg').length)"), "3", "Pele rendered");
+    assert_eq!(js("String(document.querySelectorAll('.katex-error, .render-error').length)"), "2", "one math, one Mermaid error: {}", js("[...document.querySelectorAll('.katex-error, .render-error, .math-display')].map(e => e.className + ': ' + e.textContent.slice(0, 60)).join(' | ')"));
+    // Local images, minus the deliberately broken one and the CSP probe's `src=x`.
+    let local = "[...document.images].filter(i => i.src.startsWith('prasasti://file') && !/(missing\\.png|\\/x)$/.test(i.src))";
+    wait_for_js(&web, &format!("String({local}.every(i => i.complete))"), "true", 5.0);
+    assert_eq!(js(&format!("String({local}.length)")), "4");
+    assert_eq!(js(&format!("{local}.filter(i => i.naturalWidth === 0).map(i => i.src).join(' ')")), "", "every local image loads");
+    assert_eq!(js("typeof window.__xss"), "undefined", "inline script and onerror never run");
+    doc.close();
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+fn preview_never_navigates_away() {
+    let (win, _e) = ui::window_with(
+        "<meta http-equiv=\"refresh\" content=\"0;url=https://example.com\">\n\n<form action=\"https://example.com\"><button>x</button></form>\n",
+    );
+    let v = content_of(&win);
+    v.set_mode(Mode::Preview);
+    let web = v.preview().expect("preview");
+    wait_for_js(&web, "String(document.body && document.body.dataset.rendered)", "1", 10.0);
+    web.eval("document.querySelector('form').submit(); 'ok'", 1.0);
+    ui::pump(1.0);
+    let href = web.eval("location.href", 1.0).unwrap_or_default();
+    assert!(href.starts_with("prasasti://file/"), "{href}");
+    win.close();
+}
+
+fn kitchen_sink_unchanged_after_open_close() {
+    let dir = kitchen_sink_copy("roundtrip");
+    let path = dir.join("kitchen-sink.md");
+    let before = std::fs::read(&path).unwrap();
+    let doc = disk_doc(&path);
+    doc.makeWindowControllers();
+    let win = document_window(&doc);
+    ui::shortcut(&win, "e", CMD);
+    assert_eq!(content_of(&win).mode(), Mode::Edit);
+    ui::shortcut(&win, "e", CMD);
+    assert_eq!(content_of(&win).mode(), Mode::Preview);
+    ui::pump(0.3);
+    assert!(!doc.isDocumentEdited());
+    doc.close();
+    assert_eq!(std::fs::read(&path).unwrap(), before);
+    let _ = std::fs::remove_dir_all(&dir);
 }
 
 fn main() {
@@ -2330,6 +2408,9 @@ fn main() {
         ("window_min_width_follows_column", window_min_width_follows_column),
         ("restored_narrow_window_grows", restored_narrow_window_grows),
         ("kitchen_sink_lines_fit_column", kitchen_sink_lines_fit_column),
+        ("kitchen_sink_renders", kitchen_sink_renders),
+        ("preview_never_navigates_away", preview_never_navigates_away),
+        ("kitchen_sink_unchanged_after_open_close", kitchen_sink_unchanged_after_open_close),
         ("frame_restored_exactly", frame_restored_exactly),
         ("second_window_cascades", second_window_cascades),
         ("last_closed_window_frame_is_stored", last_closed_window_frame_is_stored),

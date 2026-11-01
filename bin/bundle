@@ -10,6 +10,7 @@ mkdir -p "$app/Contents/MacOS" "$app/Contents/Resources/Fonts"
 cp target/release/prasasti "$app/Contents/MacOS/prasasti"
 cp packaging/Info.plist "$app/Contents/Info.plist"
 cp resources/fonts/* "$app/Contents/Resources/Fonts/"
+cp -R resources/preview "$app/Contents/Resources/preview"
 
 # Icon: sips renders the SVG at each size, iconutil packs the set.
 tmp=$(mktemp -d)

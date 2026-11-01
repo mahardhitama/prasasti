@@ -10,14 +10,14 @@ use objc2::rc::{Retained, Weak};
 use objc2::runtime::AnyObject;
 use objc2::{DefinedClass, MainThreadOnly, define_class, msg_send, sel};
 use objc2_app_kit::{
-    NSControlSize, NSControlStateValueOff, NSControlStateValueOn, NSLayoutConstraint, NSMenuItem, NSResponder,
+    NSControlSize, NSControlStateValueOff, NSControlStateValueOn, NSDocument, NSLayoutConstraint, NSMenuItem, NSResponder,
     NSScreen, NSScrollView, NSScroller, NSTextStorageDidProcessEditingNotification, NSView, NSWindowOrderingMode,
 };
-use objc2_foundation::{MainThreadMarker, NSArray, NSEdgeInsets, NSObject, NSObjectProtocol, NSRect, NSString, NSTimer};
-use objc2_web_kit::{WKWebView, WKWebViewConfiguration};
+use objc2_foundation::{MainThreadMarker, NSArray, NSEdgeInsets, NSObject, NSObjectProtocol, NSRect, NSTimer};
 
 use crate::editor::{EditorView, editor_in_scroll};
 use crate::find_bar::FindBar;
+use crate::preview::{self, PreviewView};
 use crate::settings;
 use crate::status::StatusPill;
 use crate::toolbar::Toolbar;
@@ -49,9 +49,7 @@ pub struct Ivars {
     toolbar: Toolbar,
     mode: Cell<Mode>,
     /// Created on the first switch to Preview.
-    web: OnceCell<Retained<WKWebView>>,
-    /// The last HTML handed to the web view.
-    html: RefCell<Option<String>>,
+    web: OnceCell<Retained<PreviewView>>,
     /// A pending Preview re-render.
     timer: RefCell<Option<Retained<NSTimer>>>,
 }
@@ -187,7 +185,6 @@ impl DocumentView {
             toolbar,
             mode: Cell::new(Mode::Edit),
             web: OnceCell::new(),
-            html: RefCell::default(),
             timer: RefCell::default(),
         });
         // SAFETY: NSView's designated initializer.
@@ -226,6 +223,10 @@ impl DocumentView {
                 if let Some(web) = v.ivars().web.get() {
                     // SAFETY: a plain setter; zoom is 0.5...3.0.
                     unsafe { web.setPageZoom(settings::zoom()) };
+                }
+                // The font or column may have changed (an unchanged page is not reloaded).
+                if v.mode() == Mode::Preview {
+                    v.render();
                 }
             }
         });
@@ -277,27 +278,35 @@ impl DocumentView {
         &self.ivars().toolbar
     }
 
-    /// The last HTML handed to the web view (None before the first Preview).
+    /// The last page handed to the web view (None before the first Preview).
     pub fn preview_html(&self) -> Option<String> {
-        self.ivars().html.borrow().clone()
+        self.ivars().web.get().map(|w| w.html())
     }
 
-    /// shortcut: a plain HTML fragment; Task 7 replaces this with PreviewView's page.
+    /// The Preview web view (None before the first Preview).
+    pub fn preview(&self) -> Option<Retained<PreviewView>> {
+        self.ivars().web.get().cloned()
+    }
+
+    /// Renders the text storage into the web view (never writes to it).
     fn render(&self) {
         let iv = self.ivars();
-        let html = crate::export::to_html(&iv.editor.string().to_string());
+        let text = iv.editor.string().to_string();
+        let html = preview::page_html(&text, &settings::font_family(), settings::BASE_SIZE, settings::column_width());
         let web = iv.web.get_or_init(|| self.make_web());
-        // SAFETY: a nil base URL is allowed.
-        unsafe { web.loadHTMLString_baseURL(&NSString::from_str(&html), None) };
-        *iv.html.borrow_mut() = Some(html);
+        web.render(&html, &preview::base_url(self.doc_dir().as_deref()));
     }
 
-    fn make_web(&self) -> Retained<WKWebView> {
-        let mtm = self.mtm();
-        // SAFETY: a fresh configuration; the frame is set by constraints.
-        let web = unsafe {
-            WKWebView::initWithFrame_configuration(mtm.alloc(), self.bounds(), &WKWebViewConfiguration::new(mtm))
-        };
+    /// The document's folder, where relative image paths resolve (None when untitled).
+    fn doc_dir(&self) -> Option<std::path::PathBuf> {
+        // SAFETY: a plain getter; the document outlives its window's content.
+        let doc = unsafe { self.window()?.windowController()?.document() }?;
+        let path = doc.downcast::<NSDocument>().ok()?.fileURL()?.path()?.to_string();
+        Some(std::path::Path::new(&path).parent()?.to_path_buf())
+    }
+
+    fn make_web(&self) -> Retained<PreviewView> {
+        let web = PreviewView::new(self.mtm(), self.bounds(), &self.ivars().editor);
         web.setTranslatesAutoresizingMaskIntoConstraints(false);
         // Under the find bar, status pill and toolbar.
         self.addSubview_positioned_relativeTo(&web, NSWindowOrderingMode::Below, Some(&self.ivars().scroll));
