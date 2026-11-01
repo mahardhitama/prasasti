@@ -9,7 +9,7 @@ use objc2::rc::{Retained, autoreleasepool};
 use objc2::runtime::{AnyObject, NSObjectProtocol};
 use objc2_app_kit::{
     NSApplication, NSBackgroundColorAttributeName, NSFontPanel, NSButton, NSDocument, NSSearchField, NSSearchFieldCell, NSEventModifierFlags, NSFont, NSFontManager, NSFontTraitMask,
-    NSGlyphProperty, NSPasteboard, NSPasteboardTypeString, NSTextInputClient, NSTextStorage,
+    NSGlyphProperty, NSPasteboard, NSPasteboardTypeHTML, NSPasteboardTypeString, NSTextView, NSTextInputClient, NSTextStorage,
 };
 use objc2_foundation::{
     MainThreadMarker, NSData, NSURL, NSUserDefaults, NSError, NSNotFound, NSPoint, NSRange, NSRect, NSSize, NSString,
@@ -287,14 +287,17 @@ const OPT_CMD: NSEventModifierFlags = NSEventModifierFlags::Option.union(CMD);
 /// Runs `f` with the general pasteboard holding `s`, restoring its string after.
 fn with_clipboard<T>(s: &str, f: impl FnOnce() -> T) -> T {
     let pb = NSPasteboard::generalPasteboard();
-    let type_ = unsafe { NSPasteboardTypeString };
-    let saved = pb.stringForType(type_);
+    let (string, html) = unsafe { (NSPasteboardTypeString, NSPasteboardTypeHTML) };
+    let saved = (pb.stringForType(string), pb.stringForType(html));
     pb.clearContents();
-    pb.setString_forType(&NSString::from_str(s), type_);
+    pb.setString_forType(&NSString::from_str(s), string);
     let r = std::panic::catch_unwind(std::panic::AssertUnwindSafe(f));
     pb.clearContents();
-    if let Some(s) = saved {
-        pb.setString_forType(&s, type_);
+    if let Some(s) = saved.0 {
+        pb.setString_forType(&s, string);
+    }
+    if let Some(h) = saved.1 {
+        pb.setString_forType(&h, html);
     }
     r.unwrap_or_else(|e| std::panic::resume_unwind(e))
 }
@@ -362,6 +365,49 @@ fn paste_normalizes_crlf() {
         t
     });
     assert_eq!(text, "a\nb");
+}
+
+fn copy_as_html_writes_both_types() {
+    let (html, text, status) = with_clipboard("old", || {
+        let (win, e) = ui::window_with("**b**");
+        e.setSelectedRange(NSRange::new(0, 1)); // the whole document is copied, not the selection
+        ui::shortcut(&win, "c", CMD | NSEventModifierFlags::Shift);
+        let pb = NSPasteboard::generalPasteboard();
+        let (html, text) = unsafe { (pb.stringForType(NSPasteboardTypeHTML), pb.stringForType(NSPasteboardTypeString)) };
+        let status = footer(&e).status();
+        win.close();
+        (html.expect("html").to_string(), text.expect("text").to_string(), status)
+    });
+    assert!(html.contains("<strong>b</strong>"), "{html}");
+    assert_eq!(text, "**b**");
+    assert_eq!(status, "Copied as HTML.");
+}
+
+fn print_view(d: &PrasastiDocument) -> (Retained<objc2_app_kit::NSPrintOperation>, Retained<NSTextView>) {
+    let doc: &NSDocument = d;
+    // SAFETY: an empty dictionary is a valid settings dictionary.
+    let op = unsafe { doc.printOperationWithSettings_error(&objc2_foundation::NSDictionary::new()) }.expect("operation");
+    let tv = op.view().expect("view").downcast::<NSTextView>().ok().expect("a text view");
+    (op, tv)
+}
+
+fn print_operation_builds() {
+    let d = doc_from(b"# T\n\nbody **x** caf\xc3\xa9\n");
+    let (op, tv) = print_view(&d);
+    let s = tv.string().to_string();
+    assert!(s.contains("T\n") || s.starts_with('T'), "{s:?}");
+    assert!(s.contains("body x caf\u{e9}"), "{s:?}"); // markers rendered away, UTF-8 intact
+    let info = op.printInfo();
+    let width = info.paperSize().width - info.leftMargin() - info.rightMargin();
+    assert_eq!(tv.frame().size.width, width);
+    assert!(tv.isVerticallyResizable() && !tv.isHorizontallyResizable());
+    assert!(tv.frame().size.height > 20.0, "laid out to its full height");
+    // SAFETY: plain getters; a null range pointer is allowed.
+    let colour = unsafe { tv.textStorage().unwrap().attribute_atIndex_effectiveRange(objc2_app_kit::NSForegroundColorAttributeName, 0, std::ptr::null_mut()) };
+    let colour: Retained<objc2_app_kit::NSColor> = colour.expect("a colour").downcast().ok().expect("an NSColor");
+    let rgb = colour.colorUsingColorSpace(&objc2_app_kit::NSColorSpace::sRGBColorSpace()).expect("rgb");
+    assert!(rgb.redComponent() < 0.01 && rgb.greenComponent() < 0.01 && rgb.blueComponent() < 0.01);
+    assert_eq!(tv.backgroundColor(), objc2_app_kit::NSColor::whiteColor());
 }
 
 fn find_bar(e: &EditorView) -> Retained<FindBar> {
@@ -1350,6 +1396,8 @@ fn main() {
         ("tab_outside_list_inserts_tab", tab_outside_list_inserts_tab),
         ("link_from_clipboard", link_from_clipboard),
         ("paste_normalizes_crlf", paste_normalizes_crlf),
+        ("copy_as_html_writes_both_types", copy_as_html_writes_both_types),
+        ("print_operation_builds", print_operation_builds),
         ("paints_matches", paints_matches),
         ("return_steps_matches", return_steps_matches),
         ("replace_all_one_undo", replace_all_one_undo),

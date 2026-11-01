@@ -1,6 +1,7 @@
 pub mod app_delegate;
 pub mod document;
 pub mod editor;
+pub mod export;
 pub mod find_bar;
 pub mod footer;
 pub mod menu;

@@ -5,16 +5,17 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use block2::{DynBlock, RcBlock};
 
 use objc2::rc::{Allocated, Retained};
+use objc2::AnyThread;
 use objc2::runtime::{AnyObject, Bool, Sel};
 use objc2::{DefinedClass, MainThreadOnly, Message, define_class, msg_send, sel};
 use objc2_app_kit::{
-    NSAlert, NSAlertFirstButtonReturn, NSAlertSecondButtonReturn, NSBackingStoreType, NSDocument,
+    NSAlert, NSAlertFirstButtonReturn, NSAttributedStringAppKitDocumentFormats, NSColor, NSForegroundColorAttributeName, NSLayoutManager, NSPrintInfo, NSPrintOperation, NSTextContainer, NSTextStorage, NSTextView, NSAlertSecondButtonReturn, NSBackingStoreType, NSDocument,
     NSDocumentChangeType, NSLayoutAttribute, NSModalResponse, NSSaveOperationType, NSStackView,
     NSUserInterfaceLayoutOrientation, NSView, NSWindow, NSWindowController, NSWindowStyleMask,
 };
 use objc2_foundation::{
-    MainThreadMarker, NSArray, NSCocoaErrorDomain, NSCopying, NSData, NSDate, NSDictionary, NSError,
-    NSFileReadInapplicableStringEncodingError, NSFileWriteUnknownError, NSLocalizedDescriptionKey,
+    MainThreadMarker, NSArray, NSAttributedString, NSCocoaErrorDomain, NSCopying, NSData, NSDate, NSDictionary, NSError,
+    NSFeatureUnsupportedError, NSFileReadInapplicableStringEncodingError, NSFileWriteUnknownError, NSLocalizedDescriptionKey,
     NSFileManager, NSObjectProtocol, NSPoint, NSProcessInfo, NSRange, NSRect, NSSearchPathDirectory,
     NSSearchPathDomainMask, NSSize, NSString, NSURL, NSURLContentModificationDateKey, ns_string,
 };
@@ -183,6 +184,20 @@ define_class!(
             let data = NSData::with_bytes(&bytes);
             *self.ivars().pending.borrow_mut() = Some(bytes);
             data
+        }
+
+        /// Print renders the Markdown as HTML into an offscreen view as wide as the page's text area.
+        #[unsafe(method_id(printOperationWithSettings:error:))]
+        fn print_operation(
+            &self,
+            settings: &NSDictionary<NSString, AnyObject>,
+            error: *mut *mut NSError,
+        ) -> Option<Retained<NSPrintOperation>> {
+            let op = guarded(|| self.build_print_operation(settings)).flatten();
+            if op.is_none() {
+                set_error(error, print_error());
+            }
+            op
         }
 
         #[unsafe(method(autosaveWithImplicitCancellability:completionHandler:))]
@@ -562,6 +577,45 @@ impl PrasastiDocument {
         }
     }
 
+    fn build_print_operation(&self, settings: &NSDictionary<NSString, AnyObject>) -> Option<Retained<NSPrintOperation>> {
+        let doc: &NSDocument = self;
+        let info: Retained<NSPrintInfo> = doc.printInfo().copy();
+        // SAFETY: the dictionary is mutable and `settings` holds print attributes.
+        unsafe { info.dictionary().addEntriesFromDictionary(settings) };
+        let width = info.paperSize().width - info.leftMargin() - info.rightMargin();
+
+        let html = crate::export::print_html(&self.text().to_string(), &crate::settings::font_family());
+        let data = NSData::with_bytes(html.as_bytes());
+        // SAFETY: no document-attributes out-parameter.
+        let rendered = unsafe { NSAttributedString::initWithHTML_documentAttributes(NSAttributedString::alloc(), &data, None) }?;
+
+        let mtm = MainThreadMarker::from(self);
+        let storage = NSTextStorage::new();
+        let layout = NSLayoutManager::new();
+        storage.addLayoutManager(&layout);
+        let container = NSTextContainer::initWithSize(NSTextContainer::alloc(), NSSize::new(width, f64::MAX));
+        container.setWidthTracksTextView(true);
+        layout.addTextContainer(&container);
+        let view = NSTextView::initWithFrame_textContainer(
+            NSTextView::alloc(mtm),
+            NSRect::new(NSPoint::new(0.0, 0.0), NSSize::new(width, 1.0)),
+            Some(&container),
+        );
+        view.setEditable(false);
+        view.setHorizontallyResizable(false);
+        view.setVerticallyResizable(true);
+        view.setMinSize(NSSize::new(width, 1.0));
+        view.setMaxSize(NSSize::new(width, f64::MAX));
+        view.setBackgroundColor(&NSColor::whiteColor());
+        storage.setAttributedString(&rendered);
+        // HTML leaves default-black runs without a colour, and the default text colour follows Dark Mode.
+        black_where_unset(&storage);
+        // Lay out to the full height now, so pagination sees the real length.
+        layout.ensureLayoutForTextContainer(&container);
+        view.sizeToFit();
+        Some(NSPrintOperation::printOperationWithView_printInfo(&view, &info))
+    }
+
     pub fn editor(&self) -> Option<Retained<EditorView>> {
         self.ivars().editor.borrow().clone()
     }
@@ -658,6 +712,30 @@ fn not_utf8_error() -> Retained<NSError> {
             Some(&info),
         )
     }
+}
+
+fn black_where_unset(storage: &NSTextStorage) {
+    // SAFETY: the key is AppKit's constant; every range comes from `attribute:atIndex:effectiveRange:`.
+    unsafe {
+        let key = NSForegroundColorAttributeName;
+        let black = NSColor::blackColor();
+        let mut at = 0;
+        while at < storage.length() {
+            let mut run = NSRange::new(0, 0);
+            if storage.attribute_atIndex_effectiveRange(key, at, &mut run).is_none() {
+                storage.addAttribute_value_range(key, &black, run);
+            }
+            at = run.end().max(at + 1);
+        }
+    }
+}
+
+fn print_error() -> Retained<NSError> {
+    let info = NSDictionary::<NSString, AnyObject>::from_slices(
+        &[unsafe { NSLocalizedDescriptionKey }],
+        &[&**ns_string!("The document couldn't be prepared for printing.")],
+    );
+    unsafe { NSError::errorWithDomain_code_userInfo(NSCocoaErrorDomain, NSFeatureUnsupportedError, Some(&info)) }
 }
 
 fn set_error(out: *mut *mut NSError, err: Retained<NSError>) {

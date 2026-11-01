@@ -224,7 +224,15 @@ define_class!(
         }
 
         #[unsafe(method(copyAsHTML:))]
-        fn copy_as_html(&self, _sender: Option<&AnyObject>) {}
+        fn copy_as_html(&self, _sender: Option<&AnyObject>) {
+            // The whole document, whatever is selected.
+            guarded(|| {
+                crate::export::copy_as_html(&NSPasteboard::generalPasteboard(), &self.string().to_string());
+                if let Some(footer) = self.footer() {
+                    footer.set_status("Copied as HTML.");
+                }
+            });
+        }
         #[unsafe(method(zoomIn:))]
         fn zoom_in(&self, _sender: Option<&AnyObject>) {
             self.zoom_by(1);
