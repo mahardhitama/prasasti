@@ -1,2 +1,3 @@
 katex 0.16.47 (npm; dist/katex.min.js, dist/katex.min.css, dist/fonts/*.woff2, LICENSE)
 pele 1.13.0 (npm; dist/pele.js, LICENSE)
+highlight.js 11.11.1 (npm @highlightjs/cdn-assets; highlight.min.js (common languages build), LICENSE)

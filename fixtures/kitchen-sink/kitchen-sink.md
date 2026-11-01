@@ -118,6 +118,24 @@ console.log(sum(1, 2));
 echo "hello" | tr a-z A-Z
 ```
 
+```python
+def walk(tree, depth=0):
+    for child in tree.children:
+        if child.is_leaf:
+            print("  " * depth + child.name)
+        else:
+            walk(child, depth + 1)
+```
+
+```html
+<ul class="notes">
+  <li><a href="/a">Alpha</a></li>
+  <li>
+    <em>Beta</em>
+  </li>
+</ul>
+```
+
 ```klingon
 qapla' this language is unknown
 ```

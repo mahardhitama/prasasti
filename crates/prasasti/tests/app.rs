@@ -2370,6 +2370,26 @@ fn kitchen_sink_renders() {
     let _ = std::fs::remove_dir_all(&dir);
 }
 
+fn preview_code_blocks_highlighted_numbered_and_copy_clean() {
+    let (win, _e) = ui::window_with("```rust\nfn main() {\n    let x = 1;\n}\n```\n\n```\nplain\n  text\n```\n");
+    let v = content_of(&win);
+    v.set_mode(Mode::Preview);
+    let web = v.preview().expect("preview");
+    wait_for_js(&web, "String(document.body && document.body.dataset.rendered)", "1", 10.0);
+    let js = |s: &str| web.eval(s, 5.0).unwrap_or_default();
+    wait_for_js(&web, "String(document.fonts.check('15px \"Prasasti JetBrains Mono\"'))", "true", 5.0);
+    assert!(js("getComputedStyle(document.querySelector('pre code')).fontFamily").contains("JetBrains Mono"));
+    assert_ne!(js("String(document.querySelectorAll('pre code .hljs-keyword').length)"), "0", "keyword token");
+    assert_eq!(js("String(document.querySelectorAll('pre:nth-of-type(1) code .line').length)"), "3");
+    assert_eq!(js("String(document.querySelectorAll('pre:nth-of-type(2) code [class^=hljs]').length)"), "0", "untagged block is not highlighted");
+    assert_eq!(js("String(document.querySelectorAll('pre:nth-of-type(2) code .line').length)"), "2", "but still numbered");
+    assert_eq!(js("String(document.querySelectorAll('.ind').length)"), "2", "one guide per indented line");
+    assert_eq!(js("getComputedStyle(document.querySelector('.line'), '::before').content"), "counter(ln)", "numbers are generated content");
+    js("(() => { const r = document.createRange(); r.selectNodeContents(document.querySelector('pre code')); const s = getSelection(); s.removeAllRanges(); s.addRange(r); return 1; })()");
+    assert_eq!(js("getSelection().toString()"), "fn main() {\n    let x = 1;\n}");
+    win.close();
+}
+
 fn preview_never_navigates_away() {
     let (win, _e) = ui::window_with(
         "<meta http-equiv=\"refresh\" content=\"0;url=https://example.com\">\n\n<form action=\"https://example.com\"><button>x</button></form>\n",
@@ -2528,6 +2548,7 @@ fn main() {
         ("restored_narrow_window_grows", restored_narrow_window_grows),
         ("kitchen_sink_lines_fit_column", kitchen_sink_lines_fit_column),
         ("kitchen_sink_renders", kitchen_sink_renders),
+        ("preview_code_blocks_highlighted_numbered_and_copy_clean", preview_code_blocks_highlighted_numbered_and_copy_clean),
         ("preview_never_navigates_away", preview_never_navigates_away),
         ("kitchen_sink_unchanged_after_open_close", kitchen_sink_unchanged_after_open_close),
         ("image_beside_doc_in_odd_folder_loads", image_beside_doc_in_odd_folder_loads),

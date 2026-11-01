@@ -113,14 +113,11 @@ pub fn page_html(markdown: &str, font_family: &str, font_px: f64, columns: usize
     html::push_html(&mut body, events.into_iter());
     // A CSS string inside <style>: no quote, backslash or `<` (`</style>`) gets out.
     let family = font_family.replace('\\', "\\\\").replace('\'', "\\'").replace('<', "\\3c ");
-    let (faces, first) = if font_family == crate::settings::DEFAULT_FAMILY {
-        let faces = BUNDLED_FACES.iter().map(|(file, weight, style)| {
-            format!("@font-face {{ font-family: '{BUNDLED_FONT}'; src: url(prasasti://app/fonts/JetBrainsMono-{file}.ttf); font-weight: {weight}; font-style: {style}; }}\n")
-        });
-        (faces.collect(), format!("'{BUNDLED_FONT}', "))
-    } else {
-        (String::new(), String::new())
-    };
+    // Code blocks always use the bundled face; only the body switches on the setting.
+    let faces: String = BUNDLED_FACES.iter().map(|(file, weight, style)| {
+        format!("@font-face {{ font-family: '{BUNDLED_FONT}'; src: url(prasasti://app/fonts/JetBrainsMono-{file}.ttf); font-weight: {weight}; font-style: {style}; }}\n")
+    }).collect();
+    let first = if font_family == crate::settings::DEFAULT_FAMILY { format!("'{BUNDLED_FONT}', ") } else { String::new() };
     let vars = |dark| {
         let names = ["bg", "text", "accent", "marker", "code-bg", "selection", "search", "current"];
         let hex = crate::theme::hex(dark);
@@ -139,6 +136,7 @@ pub fn page_html(markdown: &str, font_family: &str, font_px: f64, columns: usize
 body {{ max-width: {columns}ch; margin: 0 auto; font-family: {first}'{family}', ui-monospace, monospace; font-size: {font_px}px; }}
 </style>
 <script src="prasasti://app/katex/katex.min.js"></script>
+<script src="prasasti://app/highlight/highlight.min.js"></script>
 <script type="module" src="prasasti://app/preview.js"></script>
 </head><body>
 {body}</body></html>
@@ -590,7 +588,8 @@ mod tests {
         let p = page("x");
         assert!(p.contains("url(prasasti://app/fonts/JetBrainsMono-BoldItalic.ttf)"), "{p}");
         assert!(p.contains("font-family: 'Prasasti JetBrains Mono', 'JetBrains Mono',"), "{p}");
-        assert!(!page_html("x", "Menlo", 15.0, 80).contains("@font-face"));
+        let menlo = page_html("x", "Menlo", 15.0, 80);
+        assert!(menlo.contains("@font-face") && menlo.contains("font-family: 'Menlo', ui-monospace"), "faces stay for code blocks");
         assert_eq!(resolve("prasasti://app/fonts/JetBrainsMono-Regular.ttf", Path::new("/r")).map(|r| r.1), Some("font/ttf"));
     }
 
