@@ -8,7 +8,7 @@ use objc2::rc::{Retained, autoreleasepool};
 use objc2::runtime::AnyObject;
 use objc2_app_kit::{
     NSApplication, NSDocument, NSEventModifierFlags, NSFont, NSFontManager, NSFontTraitMask,
-    NSGlyphProperty, NSTextInputClient, NSTextStorage,
+    NSGlyphProperty, NSPasteboard, NSPasteboardTypeString, NSTextInputClient, NSTextStorage,
 };
 use objc2_foundation::{
     MainThreadMarker, NSData, NSError, NSNotFound, NSPoint, NSRange, NSRect, NSSize, NSString,
@@ -170,6 +170,37 @@ fn typing_before_bold_stays_outside() {
     win.close();
 }
 
+fn end_of_line_lands_after_closing_markers() {
+    let (win, e) = ui::window_with("text **b**\nnext");
+    e.setSelectedRange(NSRange::new(0, 0));
+    ui::key(&win, ui::RIGHT, NSEventModifierFlags::Command);
+    assert_eq!(e.selectedRange(), NSRange::new(10, 0));
+    ui::type_text(&win, "x");
+    assert_eq!(e.string().to_string(), "text **b**x\nnext");
+    win.close();
+}
+
+fn paste_ending_in_markers_keeps_caret_after() {
+    let pb = NSPasteboard::generalPasteboard();
+    let type_ = unsafe { NSPasteboardTypeString };
+    let saved = pb.stringForType(type_);
+    pb.clearContents();
+    pb.setString_forType(ns_string!("**b**"), type_);
+    let (win, e) = ui::window_with("a ");
+    e.setSelectedRange(NSRange::new(2, 0));
+    ui::shortcut(&win, "v", NSEventModifierFlags::Command);
+    let caret = e.selectedRange();
+    ui::type_text(&win, "c");
+    let text = e.string().to_string();
+    win.close();
+    pb.clearContents();
+    if let Some(s) = saved {
+        pb.setString_forType(&s, type_);
+    }
+    assert_eq!(caret, NSRange::new(7, 0));
+    assert_eq!(text, "a **b**c");
+}
+
 fn shortcut_selects_all() {
     let (win, e) = ui::window_with("abc");
     e.setSelectedRange(NSRange::new(1, 0));
@@ -258,6 +289,8 @@ fn main() {
         ("hidden_markers_have_null_glyphs", hidden_markers_have_null_glyphs),
         ("markers_show_at_caret", markers_show_at_caret),
         ("typing_before_bold_stays_outside", typing_before_bold_stays_outside),
+        ("end_of_line_lands_after_closing_markers", end_of_line_lands_after_closing_markers),
+        ("paste_ending_in_markers_keeps_caret_after", paste_ending_in_markers_keeps_caret_after),
         ("shortcut_selects_all", shortcut_selects_all),
         ("deleting_fence_line_resyncs_cache", deleting_fence_line_resyncs_cache),
         ("typing_styles_live", typing_styles_live),

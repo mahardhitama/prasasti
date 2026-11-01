@@ -157,8 +157,8 @@ define_class!(
 
 /// Hidden markers share one visual spot with the character after them, so
 /// TextKit's forward step jumps over them and the caret could never stop right
-/// before `**` (where typing stays outside the markup). A forward caret move
-/// that ends just past a run of hidden characters stops at the run's start
+/// before `**` (where typing stays outside the markup). A one-character forward
+/// step that ends just past a run of hidden characters stops at the run's start
 /// instead; the caret there reveals the markers and the next step is normal.
 fn caret_before_hidden(storage: &NSTextStorage, old: NSRange, new: NSRange) -> NSRange {
     if old.length != 0 || new.length != 0 || new.location <= old.location {
@@ -172,7 +172,10 @@ fn caret_before_hidden(storage: &NSTextStorage, old: NSRange, new: NSRange) -> N
     while start > old.location && hidden(start - 1) {
         start -= 1;
     }
-    if start > old.location && start < new.location { NSRange::new(start, 0) } else { new }
+    // Only a one-grapheme step (→), never End, ⌘→, ↓, clicks or pastes, which
+    // mean "after the markers".
+    let step = storage.string().rangeOfComposedCharacterSequenceAtIndex(old.location);
+    if start < new.location && start == step.end() { NSRange::new(start, 0) } else { new }
 }
 
 impl EditorView {
