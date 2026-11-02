@@ -2,3 +2,4 @@ katex 0.16.47 (npm; dist/katex.min.js, dist/katex.min.css, dist/fonts/*.woff2, L
 pele 1.13.0 (npm; dist/pele.js, LICENSE)
 highlight.js 11.11.1 (npm @highlightjs/cdn-assets; highlight.min.js (common languages build), LICENSE)
 lucide 0.460.0 (npm lucide-static; icons/scroll-text.svg as the app icon glyph in resources/prasasti.svg, LICENSE as resources/LICENSE-lucide)
+JetBrains Mono 2.304 (resources/fonts, linked as preview/fonts; 4 ttf + OFL.txt)
