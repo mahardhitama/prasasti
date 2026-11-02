@@ -4,7 +4,7 @@
 
 <h1 align="center">Praśasti</h1>
 
-A native macOS Markdown writer. Typed text is never lost.
+<p align="center">A native macOS Markdown writer. Typed text is never lost.</p>
 
 <p>
   <img src="docs/screenshots/light.png" alt="Praśasti in light mode" width="49%">
