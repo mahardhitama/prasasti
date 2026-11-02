@@ -1,11 +1,12 @@
 #!/bin/sh
-# Builds target/Prasasti.app (ad-hoc signed).
+# Builds target/Prasasti.app (ad-hoc signed), a link to the bundle in
+# target/bundle.noindex: Spotlight skips .noindex, so the build copy stays out of Open With.
 set -e
 cd "$(dirname "$0")/.."
 cargo build --release -p prasasti
 
-app=target/Prasasti.app
-rm -rf "$app"
+app=target/bundle.noindex/Prasasti.app
+rm -rf "$app" target/Prasasti.app
 mkdir -p "$app/Contents/MacOS" "$app/Contents/Resources/Fonts"
 cp target/release/prasasti "$app/Contents/MacOS/prasasti"
 cp packaging/Info.plist "$app/Contents/Info.plist"
@@ -26,4 +27,7 @@ done
 iconutil -c icns "$set_dir" -o "$app/Contents/Resources/prasasti.icns"
 
 codesign -s - --force "$app"
-echo "built $app"
+ln -s bundle.noindex/Prasasti.app target/Prasasti.app
+# Keep the build copy out of Open With; the installed copy is the one to list.
+/System/Library/Frameworks/CoreServices.framework/Frameworks/LaunchServices.framework/Support/lsregister -u "$app" 2>/dev/null || true
+echo "built target/Prasasti.app"
