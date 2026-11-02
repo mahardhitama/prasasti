@@ -1,5 +1,10 @@
+<!-- Glyph: lucide "scroll-text" (lucide-static v0.460.0), ISC license -->
 <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 128 128">
-  <rect width="128" height="128" rx="24" fill="#101010"/>
-  <path d="M31 30h66v68H31z" fill="#f5f1e8"/>
-  <path d="M43 48h42M43 64h34M43 80h28" fill="none" stroke="#101010" stroke-width="7" stroke-linecap="round"/>
+  <rect width="128" height="128" rx="24" fill="#000"/>
+  <g transform="translate(11.2 11.2) scale(4.4)" fill="none" stroke="#fff" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round">
+    <path d="M15 12h-5"/>
+    <path d="M15 8h-5"/>
+    <path d="M19 17V5a2 2 0 0 0-2-2H4"/>
+    <path d="M8 21h12a2 2 0 0 0 2-2v-1a1 1 0 0 0-1-1H11a1 1 0 0 0-1 1v1a2 2 0 1 1-4 0V5a2 2 0 1 0-4 0v2a1 1 0 0 0 1 1h3"/>
+  </g>
 </svg>
