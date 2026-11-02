@@ -2771,7 +2771,12 @@ fn kitchen_sink_renders() {
     wait_for_js(&web, "String(document.body && document.body.dataset.rendered)", "1", 10.0);
     let js = |s: &str| web.eval(s, 5.0).unwrap_or_default();
     assert_ne!(js("String(document.querySelectorAll('.katex').length)"), "0", "KaTeX rendered");
-    assert_eq!(js("String(document.querySelectorAll('.mermaid > svg').length)"), "3", "Pele rendered");
+    assert_eq!(js("String(document.querySelectorAll('.mermaid > svg').length)"), "3", "Mermaid rendered");
+    assert_eq!(
+        js("[...document.querySelectorAll('.mermaid svg .nodeLabel, .mermaid svg text')].length > 5 && [...document.querySelectorAll('.mermaid svg .nodeLabel, .mermaid svg text')].every(e => getComputedStyle(e).fontFamily.includes('Prasasti JetBrains Mono')) ? 'mono' : [...document.querySelectorAll('.mermaid svg .nodeLabel, .mermaid svg text')].map(e => getComputedStyle(e).fontFamily).join(' | ')"),
+        "mono",
+        "diagram labels use JetBrains Mono"
+    );
     assert_eq!(js("String(document.querySelectorAll('.katex-error, .render-error').length)"), "2", "one math, one Mermaid error: {}", js("[...document.querySelectorAll('.katex-error, .render-error, .math-display')].map(e => e.className + ': ' + e.textContent.slice(0, 60)).join(' | ')"));
     // Local images, minus the deliberately broken one and the CSP probe's `src=x`.
     let local = "[...document.images].filter(i => i.src.startsWith('prasasti://file') && !/(missing\\.png|\\/x)$/.test(i.src))";

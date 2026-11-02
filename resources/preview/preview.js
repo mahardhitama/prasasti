@@ -1,6 +1,10 @@
-// Renders math (KaTeX) and Mermaid (Pele) in place. A module script runs once
+// Renders math (KaTeX) and Mermaid in place. A module script runs once
 // the document is parsed. One block's failure never affects the others.
-import { render } from "./pele/pele.js";
+
+const DARK = matchMedia("(prefers-color-scheme: dark)");
+let diagramId = 0;
+// Diagrams use the bundled JetBrains Mono, as code blocks do (preview.rs).
+const DIAGRAM_FONT = "'Prasasti JetBrains Mono', 'JetBrains Mono', ui-monospace, monospace";
 
 const COPY_ICON =
   '<svg viewBox="0 0 16 16" width="16" height="16" fill="none" stroke="currentColor" stroke-width="1.5"><rect x="5.5" y="5.5" width="8" height="8" rx="2"/><path d="M10.5 3.5v-.5a1.5 1.5 0 0 0-1.5-1.5H4A1.5 1.5 0 0 0 2.5 3v5A1.5 1.5 0 0 0 4 9.5h.5"/></svg>';
@@ -50,18 +54,38 @@ try {
       el.insertAdjacentElement("afterend", errorBox(e));
     }
   }
-  for (const code of document.querySelectorAll("pre > code.language-mermaid")) {
-    const pre = code.parentElement;
+  const diagrams = document.querySelectorAll("pre > code.language-mermaid");
+  if (diagrams.length) {
     try {
-      const div = document.createElement("div");
-      div.className = "mermaid";
-      div.innerHTML = render(code.textContent).svg;
-      pre.replaceWith(div);
+      // Mermaid measures labels as it draws, so the font must be ready first.
+      await Promise.all([loadMermaid(), document.fonts.load("16px 'Prasasti JetBrains Mono'"), document.fonts.load("bold 16px 'Prasasti JetBrains Mono'")]);
+      for (const code of diagrams) {
+        const pre = code.parentElement;
+        try {
+          const div = document.createElement("div");
+          div.className = "mermaid";
+          div.dataset.src = code.textContent;
+          div.innerHTML = await diagramSvg(div.dataset.src);
+          pre.replaceWith(div);
+        } catch (e) {
+          pre.insertAdjacentElement("afterend", errorBox(e));
+        }
+      }
+      // The theme is fixed at render time: redraw when the appearance changes.
+      DARK.addEventListener("change", async () => {
+        for (const div of document.querySelectorAll(".mermaid")) {
+          try {
+            div.innerHTML = await diagramSvg(div.dataset.src);
+          } catch (e) {
+            console.error(e);
+          }
+        }
+      });
     } catch (e) {
-      pre.insertAdjacentElement("afterend", errorBox(e));
+      diagrams[0].parentElement.insertAdjacentElement("afterend", errorBox(e));
     }
   }
-  // After Pele: its blocks are gone, and an errored ```mermaid stays plain.
+  // After Mermaid: its blocks are gone, and an errored ```mermaid stays plain.
   for (const code of document.querySelectorAll("pre > code:not(.language-mermaid)")) {
     try {
       decorate(code);
@@ -73,6 +97,28 @@ try {
 } finally {
   keepScroll();
   document.body.dataset.rendered = "1";
+}
+
+// Mermaid is large, so a page loads it only when it has a diagram.
+function loadMermaid() {
+  return new Promise((resolve, reject) => {
+    const s = document.createElement("script");
+    s.src = "prasasti://app/mermaid/mermaid.min.js";
+    s.onload = resolve;
+    s.onerror = () => reject(new Error("Mermaid failed to load"));
+    document.head.append(s);
+  });
+}
+
+async function diagramSvg(src) {
+  mermaid.initialize({
+    startOnLoad: false,
+    suppressErrorRendering: true,
+    theme: DARK.matches ? "redux-dark-color" : "redux-color",
+    fontFamily: DIAGRAM_FONT,
+    themeVariables: { fontFamily: DIAGRAM_FONT },
+  });
+  return (await mermaid.render(`mermaid-${diagramId++}`, src)).svg;
 }
 
 // Every edit re-renders by loading a new page: put the viewport back where it

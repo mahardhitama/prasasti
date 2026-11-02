@@ -92,13 +92,6 @@ hr { border: none; border-top: 1px solid var(--marker); }
 .mermaid {
   overflow-x: auto;
   margin: 1em 0;
-  --pele-bg: var(--bg);
-  --pele-fg: var(--text);
-  --pele-line: var(--text);
-  --pele-muted: var(--marker);
-  --pele-surface: var(--code-bg);
-  --pele-border: var(--marker);
-  --pele-accent: var(--accent);
 }
 .render-error {
   color: #d20f39; /* Catppuccin Latte red */

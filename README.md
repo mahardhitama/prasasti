@@ -51,7 +51,7 @@ A Rust workspace with two crates:
 Bundled third-party components keep their own licenses:
 
 - [KaTeX](https://katex.org) 0.16.47: MIT (`resources/preview/katex/LICENSE`)
-- [Pele](https://pele.run) 1.13.0 (Mermaid renderer): MIT (`resources/preview/pele/LICENSE`)
+- [Mermaid](https://mermaid.js.org) 12.2.0, `redux-color` theme: MIT (`resources/preview/mermaid/LICENSE`)
 - [highlight.js](https://highlightjs.org) 11.11.1: BSD 3-Clause (`resources/preview/highlight/LICENSE`)
 - [JetBrains Mono](https://www.jetbrains.com/lp/mono/) 2.304: SIL Open Font License 1.1 (`resources/fonts/OFL.txt`)
 - [Lucide `scroll-text`](https://lucide.dev/icons/scroll-text) 0.460.0 (app icon glyph): ISC (`resources/LICENSE-lucide`)

@@ -49,7 +49,7 @@ How the app pieces fit together:
 
 ## Preview resources
 
-`resources/preview/` is copied into the bundle by `bin/bundle`: `preview.css`, `preview.js`, JetBrains Mono (the `fonts` symlink to `resources/fonts`), and vendored KaTeX, pele (the Mermaid renderer) and highlight.js, with versions in `resources/preview/VERSIONS`. No CDN, nothing fetched at runtime.
+`resources/preview/` is copied into the bundle by `bin/bundle`: `preview.css`, `preview.js`, JetBrains Mono (the `fonts` symlink to `resources/fonts`), and vendored KaTeX, Mermaid (`redux-color` / `redux-dark-color` themes, loaded only on pages with a diagram) and highlight.js, with versions in `resources/preview/VERSIONS`. No CDN, nothing fetched at runtime.
 
 ## App tests
 
