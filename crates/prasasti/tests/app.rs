@@ -2514,45 +2514,28 @@ fn cmd_e_toggles_mode() {
 fn toolbar_click_switches_mode() {
     let (win, _e) = ui::window_with("x");
     let v = content_of(&win);
-    let [preview, edit] = v.toolbar().buttons();
-    for (b, want) in [(&preview, Mode::Preview), (&edit, Mode::Edit)] {
-        // SAFETY: no sender, as a mouse click has none here.
-        unsafe { b.performClick(None) };
+    let c = v.toolbar().control();
+    for (i, want) in [(0, Mode::Preview), (1, Mode::Edit)] {
+        // As a click does: select the segment, then send the action.
+        c.setSelectedSegment(i);
+        // SAFETY: the control's own action and target.
+        unsafe { c.sendAction_to(c.action(), c.target().as_deref()) };
         assert_eq!(v.mode(), want);
         assert_eq!(v.toolbar().selected(), want);
     }
     win.close();
 }
 
-fn toolbar_thumb_tracks_mode() {
-    let (win, _e) = ui::window_with("x");
-    win.orderFrontRegardless(); // on screen, so the thumb slides
-    let v = content_of(&win);
-    let [preview, edit] = v.toolbar().buttons();
-    for (m, b) in [(Mode::Preview, &preview), (Mode::Edit, &edit), (Mode::Preview, &preview)] {
-        v.set_mode(m);
-        ui::pump(0.6);
-        let (t, f) = (v.toolbar().thumb().frame(), b.frame());
-        let dx = (t.origin.x + t.size.width / 2.0) - (f.origin.x + f.size.width / 2.0);
-        assert!(dx.abs() <= 1.0, "{m:?}: thumb {t:?} button {f:?}");
-    }
-    win.close();
-}
-
-fn toolbar_accessibility() {
-    use objc2_app_kit::NSAccessibility;
+fn toolbar_tabs_track_mode() {
     let (win, _e) = ui::window_with("x");
     let v = content_of(&win);
-    let [preview, edit] = v.toolbar().buttons();
-    assert_eq!(preview.title().to_string(), "Preview");
-    assert_eq!(edit.title().to_string(), "Edit");
-    for (m, on) in [(Mode::Preview, true), (Mode::Edit, false)] {
+    let c = v.toolbar().control();
+    assert_eq!(c.segmentCount(), 2);
+    assert_eq!(c.labelForSegment(0).map(|s| s.to_string()).as_deref(), Some("Preview"));
+    assert_eq!(c.labelForSegment(1).map(|s| s.to_string()).as_deref(), Some("Edit"));
+    for (m, i) in [(Mode::Preview, 0), (Mode::Edit, 1)] {
         v.set_mode(m);
-        assert_eq!(preview.isAccessibilitySelected(), on);
-        assert_eq!(edit.isAccessibilitySelected(), !on);
-    }
-    for b in [&preview, &edit] {
-        assert_eq!(b.accessibilityRole().map(|r| r.to_string()), Some(unsafe { objc2_app_kit::NSAccessibilityRadioButtonRole }.to_string()));
+        assert_eq!(c.selectedSegment(), i);
     }
     win.close();
 }
@@ -2970,8 +2953,7 @@ fn main() {
         ("file_opens_in_preview_untitled_in_edit", file_opens_in_preview_untitled_in_edit),
         ("cmd_e_toggles_mode", cmd_e_toggles_mode),
         ("toolbar_click_switches_mode", toolbar_click_switches_mode),
-        ("toolbar_thumb_tracks_mode", toolbar_thumb_tracks_mode),
-        ("toolbar_accessibility", toolbar_accessibility),
+        ("toolbar_tabs_track_mode", toolbar_tabs_track_mode),
         ("window_toolbar_centres_mode_toggle", window_toolbar_centres_mode_toggle),
         ("appearance_button_cycles", appearance_button_cycles),
         ("editor_clears_toolbar", editor_clears_toolbar),

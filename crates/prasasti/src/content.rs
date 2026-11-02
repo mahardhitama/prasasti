@@ -79,12 +79,6 @@ define_class!(
             guarded(|| self.apply_insets());
         }
 
-        #[unsafe(method(viewDidChangeEffectiveAppearance))]
-        fn view_did_change_effective_appearance(&self) {
-            // SAFETY: NSView's own implementation, same signature.
-            let () = unsafe { msg_send![super(self), viewDidChangeEffectiveAppearance] };
-            guarded(|| self.ivars().toolbar.apply_appearance());
-        }
         #[unsafe(method(showPreview:))]
         fn show_preview(&self, _sender: Option<&AnyObject>) {
             guarded(|| self.set_mode(Mode::Preview));
@@ -92,6 +86,10 @@ define_class!(
         #[unsafe(method(showEditor:))]
         fn show_editor(&self, _sender: Option<&AnyObject>) {
             guarded(|| self.set_mode(Mode::Edit));
+        }
+        #[unsafe(method(selectMode:))]
+        fn select_mode(&self, _sender: Option<&AnyObject>) {
+            guarded(|| self.set_mode(self.ivars().toolbar.selected()));
         }
         #[unsafe(method(togglePreview:))]
         fn toggle_preview(&self, _sender: Option<&AnyObject>) {
