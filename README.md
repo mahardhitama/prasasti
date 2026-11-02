@@ -43,3 +43,15 @@ A Rust workspace with two crates:
 
 - `bin/bundle`: builds `target/Prasasti.app`.
 - `bin/test`: runs every test.
+
+## License
+
+[MIT](LICENSE) © 2026 Prasetya Mahardhitama.
+
+Bundled third-party components keep their own licenses:
+
+- [KaTeX](https://katex.org): MIT (`resources/preview/katex/LICENSE`)
+- Pele (Mermaid renderer): MIT (`resources/preview/pele/LICENSE`)
+- [highlight.js](https://highlightjs.org): BSD 3-Clause (`resources/preview/highlight/LICENSE`)
+- [JetBrains Mono](https://www.jetbrains.com/lp/mono/): SIL Open Font License 1.1 (`resources/fonts/OFL.txt`)
+- App icon glyph: [Lucide](https://lucide.dev) `scroll-text`, ISC
