@@ -35,6 +35,8 @@ const RENDER_DELAY: f64 = 0.25;
 
 /// Room left at the bottom of the text.
 const BOTTOM_INSET: f64 = 24.0;
+/// The gap above the first line, as Preview's body padding (preview.css).
+const TOP_GAP: f64 = 16.0;
 /// The editor's horizontal inset on each side at the minimum width.
 const SIDE: f64 = 16.0;
 
@@ -389,7 +391,7 @@ impl DocumentView {
     /// The text clears the titlebar (when the scroll view runs under it) and the toolbar.
     fn apply_insets(&self) {
         let iv = self.ivars();
-        let top = if iv.find_bar.isHidden() { self.safeAreaInsets().top } else { 0.0 };
+        let top = TOP_GAP + if iv.find_bar.isHidden() { self.safeAreaInsets().top } else { 0.0 };
         let insets = NSEdgeInsets { top, left: 0.0, bottom: BOTTOM_INSET, right: 0.0 };
         let cur = iv.scroll.contentInsets();
         if (cur.top, cur.bottom) != (insets.top, insets.bottom) {

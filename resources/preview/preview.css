@@ -81,8 +81,11 @@ blockquote { margin: 1em 0; padding: 0 1em; border-left: 3px solid var(--marker)
 table { border-collapse: collapse; display: block; overflow-x: auto; margin: 1em 0; }
 th, td { border: 1px solid var(--marker); padding: 0.3em 0.6em; }
 img { max-width: 100%; }
-.footnote-definition { display: flex; gap: 0.5em; align-items: baseline; margin: 0.4em 0; }
-.footnote-definition p { margin: 0; }
+.footnote-definition { margin: 0.4em 0; }
+.footnote-definition p { display: inline; margin: 0; }
+/* An image alone in its paragraph (preview.js) and diagrams are centred. */
+p.lone-image, .mermaid { text-align: center; }
+img.broken { width: 160px; height: 120px; }
 hr { border: none; border-top: 1px solid var(--marker); }
 .math-display { display: block; overflow-x: auto; }
 .mermaid {

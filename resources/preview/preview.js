@@ -7,6 +7,30 @@ const COPY_ICON =
 const CHECK_ICON =
   '<svg viewBox="0 0 16 16" width="16" height="16" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M3 8.5l3.2 3.2L13 4.8"/></svg>';
 
+// A module runs after parsing, when an image may already have failed:
+// recheck finished ones, then catch later failures.
+const BROKEN =
+  "data:image/svg+xml," +
+  encodeURIComponent(
+    '<svg xmlns="http://www.w3.org/2000/svg" width="160" height="120" viewBox="0 0 160 120"><rect x="1" y="1" width="158" height="118" rx="8" fill="none" stroke="#9ca0b0" stroke-width="2" stroke-dasharray="6 4"/><text x="80" y="58" text-anchor="middle" font-family="-apple-system,sans-serif" font-size="28" font-weight="600" fill="#9ca0b0">404</text><text x="80" y="84" text-anchor="middle" font-family="-apple-system,sans-serif" font-size="12" fill="#9ca0b0">Image not found</text></svg>',
+  );
+function markBroken(img) {
+  if (img.classList.contains("broken")) return;
+  img.classList.add("broken");
+  img.title ||= img.getAttribute("src") ?? "";
+  img.src = BROKEN;
+}
+document.addEventListener("error", (e) => e.target instanceof HTMLImageElement && markBroken(e.target), true);
+for (const img of document.images) {
+  if (img.complete && img.naturalWidth === 0) markBroken(img);
+}
+for (const p of document.querySelectorAll("p")) {
+  const nodes = [...p.childNodes].filter((n) => n.nodeType !== Node.TEXT_NODE || n.textContent.trim());
+  const only = nodes.length === 1 ? nodes[0] : null;
+  if (only?.tagName === "IMG" || (only?.tagName === "A" && only.children.length === 1 && only.firstElementChild.tagName === "IMG" && !only.textContent.trim()))
+    p.classList.add("lone-image");
+}
+
 try {
   for (const el of document.querySelectorAll(".math-inline, .math-display")) {
     try {
