@@ -31,6 +31,14 @@ for (const p of document.querySelectorAll("p")) {
     p.classList.add("lone-image");
 }
 
+// A local image outside a link opens in its default app (preview.rs).
+document.addEventListener("click", (e) => {
+  const img = e.target instanceof HTMLImageElement ? e.target : null;
+  if (!img || img.closest("a") || img.classList.contains("broken") || !img.src.startsWith("prasasti://file/")) return;
+  e.preventDefault();
+  window.webkit.messageHandlers.prasasti.postMessage({ type: "openImage", src: img.src });
+});
+
 try {
   for (const el of document.querySelectorAll(".math-inline, .math-display")) {
     try {

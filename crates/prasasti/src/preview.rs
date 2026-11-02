@@ -321,7 +321,12 @@ define_class!(
             guarded(|| {
                 // SAFETY: a plain getter; the body is page input, so it is checked below.
                 let body = unsafe { message.body() };
-                if let Some(text) = copy_text(&body) {
+                if let Some(src) = page_message(&body, "openImage", "src") {
+                    // Only a local image; open_outside still refuses anything that could launch.
+                    if src.starts_with("prasasti://file/") && resolve(&src, Path::new("/")).is_some() {
+                        open_outside(&src);
+                    }
+                } else if let Some(text) = page_message(&body, "copy", "text") {
                     let pb = NSPasteboard::generalPasteboard();
                     pb.clearContents();
                     // SAFETY: a constant type name.
@@ -343,13 +348,11 @@ impl CopyHandler {
     }
 }
 
-/// The text of a `{type: "copy", text: String}` page message; anything else is ignored.
-fn copy_text(body: &AnyObject) -> Option<String> {
+/// The string `field` of a `{type: kind, field: String}` page message; anything else is ignored.
+fn page_message(body: &AnyObject, kind: &str, field: &str) -> Option<String> {
     let dict = body.downcast_ref::<NSDictionary>()?;
-    let get = |k: &NSString| dict.objectForKey(k);
-    let kind = get(ns_string!("type"))?;
-    let text = get(ns_string!("text"))?;
-    (kind.downcast_ref::<NSString>()?.to_string() == "copy").then(|| text.downcast_ref::<NSString>().map(|t| t.to_string()))?
+    let get = |k: &str| Some(dict.objectForKey(&NSString::from_str(k))?.downcast::<NSString>().ok()?.to_string());
+    (get("type")? == kind).then(|| get(field))?
 }
 
 pub struct Ivars {
@@ -633,6 +636,20 @@ mod tests {
     #[test]
     fn mermaid_fence_kept() {
         assert!(page("```mermaid\nflowchart TD\n```\n").contains(r#"<code class="language-mermaid">"#));
+    }
+
+    #[test]
+    fn page_message_reads_only_its_kind() {
+        let msg = |pairs: &[(&str, &str)]| {
+            let keys: Vec<_> = pairs.iter().map(|p| NSString::from_str(p.0)).collect();
+            let vals: Vec<_> = pairs.iter().map(|p| NSString::from_str(p.1)).collect();
+            NSDictionary::from_retained_objects(&keys.iter().map(|k| &**k).collect::<Vec<_>>(), &vals)
+        };
+        let open = msg(&[("type", "openImage"), ("src", "prasasti://file/a.png")]);
+        assert_eq!(page_message(&open, "openImage", "src").as_deref(), Some("prasasti://file/a.png"));
+        assert_eq!(page_message(&open, "copy", "text"), None);
+        assert_eq!(page_message(&msg(&[("type", "openImage")]), "openImage", "src"), None);
+        assert_eq!(page_message(&NSString::from_str("x"), "copy", "text"), None);
     }
 
     #[test]
