@@ -2,7 +2,7 @@
   <img src="resources/prasasti.svg" alt="Praśasti icon" width="128">
 </p>
 
-# Praśasti
+<h1 align="center">Praśasti</h1>
 
 A native macOS Markdown writer. Typed text is never lost.
 
