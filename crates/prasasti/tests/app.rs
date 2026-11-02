@@ -1846,11 +1846,11 @@ fn hold_shows_status_pill() {
     });
 }
 
-fn window_has_no_visible_titlebar() {
+fn window_has_native_title() {
     on_disk("titlebar", "a\n", |fx| {
         // Opaque: AppKit blurs the text scrolling under it only then.
         assert!(!fx.win.titlebarAppearsTransparent());
-        assert_eq!(fx.win.titleVisibility(), objc2_app_kit::NSWindowTitleVisibility::Hidden);
+        assert_eq!(fx.win.titleVisibility(), objc2_app_kit::NSWindowTitleVisibility::Visible);
         assert!(fx.win.styleMask().contains(objc2_app_kit::NSWindowStyleMask::FullSizeContentView));
         assert!(fx.win.title().to_string().starts_with("doc"), "{}", fx.win.title());
     });
@@ -2557,29 +2557,24 @@ fn toolbar_accessibility() {
     win.close();
 }
 
-/// The text of the toolbar's centred title item.
-fn toolbar_title(win: &objc2_app_kit::NSWindow) -> String {
-    let tb = win.toolbar().expect("toolbar");
-    let item = tb.items().iter().find(|i| i.itemIdentifier().to_string() == prasasti::titlebar::TITLE_ITEM).expect("title item");
-    item.view().expect("view").downcast::<objc2_app_kit::NSTextField>().expect("label").stringValue().to_string()
-}
-
-fn window_has_toolbar_with_title() {
+fn window_toolbar_centres_mode_toggle() {
+    use objc2_app_kit::NSTitlebarSeparatorStyle;
     on_disk("title", "a\n", |fx| {
         let tb = fx.win.toolbar().expect("toolbar");
         assert!(!tb.allowsUserCustomization());
         assert!(!tb.autosavesConfiguration());
         assert_eq!(fx.win.toolbarStyle(), objc2_app_kit::NSWindowToolbarStyle::Unified);
         assert_eq!(fx.win.title().to_string(), fx.doc.displayName().to_string());
-        assert_eq!(toolbar_title(&fx.win), fx.win.title().to_string());
-        let new = fx.path.with_file_name("moved.md");
-        let url = NSURL::fileURLWithPath(&NSString::from_str(new.to_str().unwrap()));
-        let done = std::rc::Rc::new(std::cell::Cell::new(false));
-        let d = done.clone();
-        let block = block2::RcBlock::new(move |_: *mut NSError| d.set(true));
-        fx.doc.saveToURL_ofType_forSaveOperation_completionHandler(&url, ns_string!(MD), objc2_app_kit::NSSaveOperationType::SaveAsOperation, &block);
-        wait_until(|| done.get());
-        wait_until(|| toolbar_title(&fx.win) == fx.win.title().to_string() && fx.win.title().to_string().starts_with("moved"));
+        let v = content_of(&fx.win);
+        let id = NSString::from_str(prasasti::titlebar::MODE_ITEM);
+        assert!(tb.centeredItemIdentifiers().containsObject(&id));
+        let item = tb.items().iter().find(|i| i.itemIdentifier() == id).expect("mode item");
+        assert!(item.view().is_some_and(|w| &*w == v.toolbar().view()));
+        // The web view never reports scrolling, so Preview drops the line.
+        v.set_mode(Mode::Preview);
+        assert_eq!(fx.win.titlebarSeparatorStyle(), NSTitlebarSeparatorStyle::None);
+        v.set_mode(Mode::Edit);
+        assert_eq!(fx.win.titlebarSeparatorStyle(), NSTitlebarSeparatorStyle::Automatic);
     });
 }
 
@@ -2956,7 +2951,7 @@ fn main() {
         ("glass_and_webkit_available", glass_and_webkit_available),
         ("kitchen_sink_is_well_formed", kitchen_sink_is_well_formed),
         ("hold_shows_status_pill", hold_shows_status_pill),
-        ("window_has_no_visible_titlebar", window_has_no_visible_titlebar),
+        ("window_has_native_title", window_has_native_title),
         ("column_width_fixed", column_width_fixed),
         ("window_min_width_follows_column", window_min_width_follows_column),
         ("restored_narrow_window_grows", restored_narrow_window_grows),
@@ -2977,7 +2972,7 @@ fn main() {
         ("toolbar_click_switches_mode", toolbar_click_switches_mode),
         ("toolbar_thumb_tracks_mode", toolbar_thumb_tracks_mode),
         ("toolbar_accessibility", toolbar_accessibility),
-        ("window_has_toolbar_with_title", window_has_toolbar_with_title),
+        ("window_toolbar_centres_mode_toggle", window_toolbar_centres_mode_toggle),
         ("appearance_button_cycles", appearance_button_cycles),
         ("editor_clears_toolbar", editor_clears_toolbar),
         ("preview_ignores_typing_and_edit_commands", preview_ignores_typing_and_edit_commands),

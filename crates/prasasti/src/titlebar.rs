@@ -1,38 +1,32 @@
-//! The document window's native toolbar: the window title centred (the unified
-//! style puts the native title at the leading edge) and, at the trailing edge,
-//! a button that cycles the app's appearance System → Light → Dark.
+//! The document window's native toolbar: the native title at the leading edge,
+//! the Preview | Edit toggle centred and, at the trailing edge, a button that
+//! cycles the app's appearance System → Light → Dark.
 
 use std::cell::{Cell, RefCell};
-use std::ffi::c_void;
 
 use objc2::rc::{Retained, Weak};
 use objc2::runtime::{AnyClass, AnyObject};
 use objc2::{DefinedClass, MainThreadOnly, define_class, msg_send, sel};
 use objc2_app_kit::{
-    NSAccessibility, NSAppearance, NSAppearanceNameAqua, NSAppearanceNameDarkAqua, NSApplication, NSButton, NSFont,
-    NSImage, NSImageView, NSLineBreakMode, NSTextField, NSToolbar, NSToolbarDelegate, NSToolbarDisplayMode,
-    NSToolbarFlexibleSpaceItemIdentifier, NSToolbarItem, NSView, NSWindow, NSWindowToolbarStyle,
+    NSAccessibility, NSAppearance, NSAppearanceNameAqua, NSAppearanceNameDarkAqua, NSApplication, NSButton, NSImage,
+    NSImageView, NSToolbar, NSToolbarDelegate, NSToolbarDisplayMode, NSToolbarFlexibleSpaceItemIdentifier,
+    NSToolbarItem, NSView, NSWindow, NSWindowToolbarStyle,
 };
-use objc2_foundation::{
-    MainThreadMarker, NSArray, NSKeyValueObservingOptions, NSObject, NSObjectNSKeyValueObserverRegistration,
-    NSObjectProtocol, NSSet, NSString, ns_string,
-};
+use objc2_foundation::{MainThreadMarker, NSArray, NSObject, NSObjectProtocol, NSSet, NSString, ns_string};
 
 use crate::settings;
 use crate::util::{Observer, guarded, observe};
 
-pub const TITLE_ITEM: &str = "PrasastiTitle";
+pub const MODE_ITEM: &str = "PrasastiMode";
 const APPEARANCE_ITEM: &str = "PrasastiAppearance";
 
 pub struct Ivars {
-    window: Weak<NSWindow>,
-    label: Retained<NSTextField>,
+    /// The Preview | Edit toggle (owned by the window's content view).
+    mode: Retained<NSView>,
     button: Retained<NSButton>,
     icon: Retained<NSImageView>,
     /// The mode the button shows ("" before the first refresh).
     shown: Cell<&'static str>,
-    /// Registered for KVO on the window's title until it closes.
-    observing: Cell<bool>,
     observers: RefCell<Vec<Observer>>,
 }
 
@@ -74,18 +68,13 @@ define_class!(
                 apply_appearance(self.mtm());
             });
         }
-
-        #[unsafe(method(observeValueForKeyPath:ofObject:change:context:))]
-        fn observe_value(&self, _key: Option<&NSString>, _object: Option<&AnyObject>, _change: Option<&AnyObject>, _context: *mut c_void) {
-            guarded(|| self.sync_title());
-        }
     }
 );
 
 fn ids() -> Retained<NSArray<NSString>> {
     // SAFETY: a constant string.
     let flexible = unsafe { NSToolbarFlexibleSpaceItemIdentifier };
-    NSArray::from_slice(&[ns_string!(TITLE_ITEM), flexible, ns_string!(APPEARANCE_ITEM)])
+    NSArray::from_slice(&[ns_string!(MODE_ITEM), flexible, ns_string!(APPEARANCE_ITEM)])
 }
 
 /// Sets NSApp's appearance from the setting: None follows the system.
@@ -106,12 +95,10 @@ pub fn appearance_button(window: &NSWindow) -> Option<Retained<NSButton>> {
 }
 
 impl Titlebar {
-    /// Gives `window` its toolbar; the caller keeps the returned delegate while the window lives.
-    pub fn install(window: &NSWindow) -> Retained<Self> {
+    /// Gives `window` its toolbar with `mode` centred; the caller keeps the
+    /// returned delegate while the window lives.
+    pub fn install(window: &NSWindow, mode: &NSView) -> Retained<Self> {
         let mtm = window.mtm();
-        let label = NSTextField::labelWithString(&window.title(), mtm);
-        label.setFont(Some(&NSFont::titleBarFontOfSize(0.0)));
-        label.setLineBreakMode(NSLineBreakMode::ByTruncatingMiddle);
         // SAFETY: no target yet (set below, to the delegate); an action selector.
         let button = unsafe { NSButton::buttonWithTitle_target_action(ns_string!(""), None, Some(sel!(cycleAppearance:)), mtm) };
         button.setBordered(false);
@@ -125,12 +112,10 @@ impl Titlebar {
         icon.centerXAnchor().constraintEqualToAnchor(&button.centerXAnchor()).setActive(true);
         icon.centerYAnchor().constraintEqualToAnchor(&button.centerYAnchor()).setActive(true);
         let this = Self::alloc(mtm).set_ivars(Ivars {
-            window: Weak::new(window),
-            label,
+            mode: Retained::from(mode),
             button,
             icon,
             shown: Cell::new(""),
-            observing: Cell::new(false),
             observers: RefCell::default(),
         });
         // SAFETY: NSObject's init.
@@ -145,36 +130,24 @@ impl Titlebar {
         toolbar.setAllowsUserCustomization(false);
         toolbar.setAutosavesConfiguration(false);
         toolbar.setDisplayMode(NSToolbarDisplayMode::IconOnly);
-        toolbar.setCenteredItemIdentifiers(&NSSet::from_slice(&[ns_string!(TITLE_ITEM)]));
+        toolbar.setCenteredItemIdentifiers(&NSSet::from_slice(&[ns_string!(MODE_ITEM)]));
         window.setToolbarStyle(NSWindowToolbarStyle::Unified);
         window.setToolbar(Some(&toolbar));
 
-        // SAFETY: `this` implements observeValueForKeyPath:…; removed when the window closes.
-        unsafe {
-            window.addObserver_forKeyPath_options_context(&this, ns_string!("title"), NSKeyValueObservingOptions::Initial, std::ptr::null_mut())
-        };
-        iv.observing.set(true);
         let weak = Weak::new(&*this);
         let changed = observe(settings::CHANGED, None, move || {
             if let Some(t) = weak.load() {
                 t.refresh();
             }
         });
-        let weak = Weak::new(&*this);
-        let sender: &AnyObject = window;
-        let closing = observe("NSWindowWillCloseNotification", Some(sender), move || {
-            if let Some(t) = weak.load() {
-                t.stop_observing();
-            }
-        });
-        *iv.observers.borrow_mut() = vec![changed, closing];
+        *iv.observers.borrow_mut() = vec![changed];
         this
     }
 
     fn make_item(&self, id: &NSString) -> Option<Retained<NSToolbarItem>> {
         let iv = self.ivars();
-        let view: &NSView = if id == ns_string!(TITLE_ITEM) {
-            &iv.label
+        let view: &NSView = if id == ns_string!(MODE_ITEM) {
+            &iv.mode
         } else if id == ns_string!(APPEARANCE_ITEM) {
             &iv.button
         } else {
@@ -182,24 +155,8 @@ impl Titlebar {
         };
         let item = NSToolbarItem::initWithItemIdentifier(NSToolbarItem::alloc(self.mtm()), id);
         item.setView(Some(view));
-        if id == ns_string!(APPEARANCE_ITEM) {
-            item.setLabel(ns_string!("Appearance"));
-        }
+        item.setLabel(if id == ns_string!(MODE_ITEM) { ns_string!("Mode") } else { ns_string!("Appearance") });
         Some(item)
-    }
-
-    fn sync_title(&self) {
-        if let Some(w) = self.ivars().window.load() {
-            self.ivars().label.setStringValue(&w.title());
-        }
-    }
-
-    fn stop_observing(&self) {
-        let iv = self.ivars();
-        if let Some(w) = iv.window.load().filter(|_| iv.observing.replace(false)) {
-            // SAFETY: registered in `install` with this observer and key path.
-            unsafe { w.removeObserver_forKeyPath(self, ns_string!("title")) };
-        }
     }
 
     /// Shows the current setting's symbol, swapping it with the replace transition once on screen.

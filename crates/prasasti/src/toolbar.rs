@@ -1,4 +1,4 @@
-//! The floating glass toolbar: a Preview | Edit toggle built from glass views, a
+//! The window toolbar's Preview | Edit toggle, built from glass views, a
 //! capsule track and a clear glass thumb that slides under the selected label.
 //! NSSegmentedControl draws an accent-filled selection and never animates it.
 
@@ -21,9 +21,9 @@ use crate::glass::GlassView;
 use crate::util::guarded;
 
 /// Track padding around the thumb, each label's width, and the thumb's height.
-const PAD: f64 = 4.0;
-const SEGMENT_WIDTH: f64 = 110.0;
-const THUMB_HEIGHT: f64 = 36.0;
+const PAD: f64 = 3.0;
+const SEGMENT_WIDTH: f64 = 76.0;
+const THUMB_HEIGHT: f64 = 26.0;
 const WIDTH: f64 = 2.0 * PAD + 2.0 * SEGMENT_WIDTH;
 const HEIGHT: f64 = 2.0 * PAD + THUMB_HEIGHT;
 
@@ -138,7 +138,7 @@ impl Toolbar {
             let sel = i == on;
             // SAFETY: plain extern statics.
             let weight = unsafe { if sel { NSFontWeightBold } else { NSFontWeightMedium } };
-            let font = NSFont::systemFontOfSize_weight(15.0, weight);
+            let font = NSFont::systemFontOfSize_weight(13.0, weight);
             let color = if sel { NSColor::labelColor() } else { NSColor::secondaryLabelColor() };
             let attrs = NSDictionary::from_slices(
                 &unsafe { [NSFontAttributeName, NSForegroundColorAttributeName] },

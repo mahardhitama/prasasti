@@ -12,7 +12,7 @@ use objc2::{DefinedClass, MainThreadOnly, Message, define_class, msg_send, sel};
 use objc2_app_kit::{
     NSAlert, NSAlertFirstButtonReturn, NSFont, NSFontAttributeName, NSFontManager, NSAttributedStringDocumentFormats, NSDocumentTypeDocumentOption, NSHTMLTextDocumentType, NSTimeoutDocumentOption, NSColor, NSForegroundColorAttributeName, NSLayoutManager, NSPrintInfo, NSPrintOperation, NSTextContainer, NSTextStorage, NSTextView, NSAlertSecondButtonReturn, NSBackingStoreType, NSDocument,
     NSDocumentChangeType, NSModalResponse, NSSaveOperationType,
-    NSApplication, NSWindow, NSWindowController, NSWindowStyleMask, NSWindowTabbingMode, NSWindowTitleVisibility,
+    NSApplication, NSWindow, NSWindowController, NSWindowStyleMask, NSWindowTabbingMode,
 };
 use objc2_foundation::{
     MainThreadMarker, NSArray, NSAttributedString, NSCocoaErrorDomain, NSCopying, NSData, NSDate, NSDictionary, NSError,
@@ -161,11 +161,7 @@ define_class!(
             };
             unsafe { window.setReleasedWhenClosed(false) };
             // The text scrolls under the titlebar and toolbar, which blur it
-            // (titlebarAppearsTransparent would drop that edge effect). The
-            // native title stays hidden (unified style puts it at the leading
-            // edge); the toolbar centres it, and it remains for the Window
-            // menu, Mission Control and Accessibility.
-            window.setTitleVisibility(NSWindowTitleVisibility::Hidden);
+            // (titlebarAppearsTransparent would drop that edge effect).
             window.setTabbingMode(NSWindowTabbingMode::Disallowed);
 
             let (content, editor) = window_content(frame);
@@ -210,7 +206,7 @@ define_class!(
             content.update_min_width();
             self.addWindowController(&controller);
             // After the controller, which sets the window's title.
-            *self.ivars().titlebar.borrow_mut() = Some(Titlebar::install(&window));
+            *self.ivars().titlebar.borrow_mut() = Some(Titlebar::install(&window, content.toolbar().view()));
             // After the controller: Preview resolves image paths against this document's folder.
             content.set_mode(if self.ivars().read_from_disk.get() { Mode::Preview } else { Mode::Edit });
             *self.ivars().editor.borrow_mut() = Some(editor);

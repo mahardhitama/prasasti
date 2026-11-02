@@ -76,9 +76,9 @@ fn rewrite_raw_src(html: &str) -> String {
     out
 }
 
-/// The whole page: CSP, both palettes, the column, the app's scripts and the
+/// The whole page: CSP, both palettes, the app's scripts and the
 /// Markdown body. `file://` image URLs become `prasasti://file/…`.
-pub fn page_html(markdown: &str, font_family: &str, font_px: f64, columns: usize) -> String {
+pub fn page_html(markdown: &str, font_family: &str, font_px: f64) -> String {
     let options = Options::ENABLE_MATH
         | Options::ENABLE_TABLES
         | Options::ENABLE_TASKLISTS
@@ -136,7 +136,7 @@ pub fn page_html(markdown: &str, font_family: &str, font_px: f64, columns: usize
 <style>
 {faces}:root {{ {light} }}
 @media (prefers-color-scheme: dark) {{ :root {{ {dark} }} }}
-body {{ max-width: {columns}ch; margin: 0 auto; font-family: {first}'{family}', ui-monospace, monospace; font-size: {font_px}px; }}
+body {{ font-family: {first}'{family}', ui-monospace, monospace; font-size: {font_px}px; }}
 </style>
 <script src="prasasti://app/katex/katex.min.js"></script>
 <script src="prasasti://app/highlight/highlight.min.js"></script>
@@ -611,7 +611,7 @@ mod tests {
     use super::*;
 
     fn page(md: &str) -> String {
-        page_html(md, "JetBrains Mono", 15.0, 80)
+        page_html(md, "JetBrains Mono", 15.0)
     }
 
     #[test]
@@ -636,15 +636,15 @@ mod tests {
     }
 
     #[test]
-    fn page_has_csp_and_column() {
+    fn page_has_csp_and_full_width() {
         let p = page("x");
         assert!(p.contains(&format!(r#"content="{CSP}""#)), "{p}");
-        assert!(p.contains("max-width: 80ch"), "{p}");
+        assert!(!p.contains("max-width"), "only the editor keeps the column: {p}");
     }
 
     #[test]
     fn family_cannot_close_the_style_element() {
-        let p = page_html("x", "A'</style><script>", 15.0, 80);
+        let p = page_html("x", "A'</style><script>", 15.0);
         assert!(!p.contains("</style><script>"), "{p}");
     }
 
@@ -665,7 +665,7 @@ mod tests {
         let p = page("x");
         assert!(p.contains("url(prasasti://app/fonts/JetBrainsMono-BoldItalic.ttf)"), "{p}");
         assert!(p.contains("font-family: 'Prasasti JetBrains Mono', 'JetBrains Mono',"), "{p}");
-        let menlo = page_html("x", "Menlo", 15.0, 80);
+        let menlo = page_html("x", "Menlo", 15.0);
         assert!(menlo.contains("@font-face") && menlo.contains("font-family: 'Menlo', ui-monospace"), "faces stay for code blocks");
         assert_eq!(resolve("prasasti://app/fonts/JetBrainsMono-Regular.ttf", Path::new("/r")).map(|r| r.1), Some("font/ttf"));
     }

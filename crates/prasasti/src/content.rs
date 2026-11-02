@@ -1,6 +1,7 @@
 //! The document window's content view: the editor's scroll view fills the
 //! window (under the opaque unified-toolbar titlebar), the find bar sits below the
-//! titlebar, and the status pill floats near the bottom, above the toolbar.
+//! titlebar, and the status pill floats near the bottom. The Preview | Edit
+//! toggle it owns sits in the window's toolbar (titlebar.rs).
 //! It also owns the window's mode: Edit shows the editor, Preview hides it
 //! (it stays in the window, the only source of truth) and shows a web view.
 
@@ -11,7 +12,7 @@ use objc2::runtime::AnyObject;
 use objc2::{DefinedClass, MainThreadOnly, define_class, msg_send, sel};
 use objc2_app_kit::{
     NSControlSize, NSControlStateValueOff, NSControlStateValueOn, NSDocument, NSLayoutConstraint, NSMenuItem, NSResponder,
-    NSScreen, NSScrollView, NSScroller, NSTextStorageDidProcessEditingNotification, NSView, NSWindowOrderingMode,
+    NSScreen, NSScrollView, NSScroller, NSTextStorageDidProcessEditingNotification, NSTitlebarSeparatorStyle, NSView, NSWindowOrderingMode,
 };
 use objc2_foundation::{MainThreadMarker, NSArray, NSEdgeInsets, NSObject, NSObjectProtocol, NSRect, NSTimer};
 
@@ -32,8 +33,8 @@ pub enum Mode {
 /// Preview re-renders at most this often while the text changes underneath it.
 const RENDER_DELAY: f64 = 0.25;
 
-/// Room left at the bottom of the text for the floating toolbar.
-const BOTTOM_INSET: f64 = 64.0;
+/// Room left at the bottom of the text.
+const BOTTOM_INSET: f64 = 24.0;
 /// The editor's horizontal inset on each side at the minimum width.
 const SIDE: f64 = 16.0;
 
@@ -193,7 +194,7 @@ impl DocumentView {
         let this: Retained<Self> = unsafe { msg_send![super(this), initWithFrame: frame] };
         let iv = this.ivars();
         iv.toolbar.set_target(&this);
-        for v in [&*iv.scroll as &NSView, &iv.find_bar, &iv.status, iv.toolbar.view()] {
+        for v in [&*iv.scroll as &NSView, &iv.find_bar, &iv.status] {
             v.setTranslatesAutoresizingMaskIntoConstraints(false);
             this.addSubview(v);
         }
@@ -212,9 +213,7 @@ impl DocumentView {
             iv.scroll.trailingAnchor().constraintEqualToAnchor(&this.trailingAnchor()),
             iv.scroll.bottomAnchor().constraintEqualToAnchor(&this.bottomAnchor()),
             iv.status.centerXAnchor().constraintEqualToAnchor(&this.centerXAnchor()),
-            this.bottomAnchor().constraintEqualToAnchor_constant(&iv.status.bottomAnchor(), 56.0),
-            iv.toolbar.view().centerXAnchor().constraintEqualToAnchor(&this.centerXAnchor()),
-            this.bottomAnchor().constraintEqualToAnchor_constant(&iv.toolbar.view().bottomAnchor(), 12.0),
+            this.bottomAnchor().constraintEqualToAnchor_constant(&iv.status.bottomAnchor(), 16.0),
         ]));
         iv.scroll.setAutomaticallyAdjustsContentInsets(false);
         this.apply_insets();
@@ -268,6 +267,9 @@ impl DocumentView {
             w.setHidden(!preview);
         }
         if let Some(win) = self.window() {
+            // The web view isn't an NSScrollView, so AppKit can't tell when it
+            // scrolls under the titlebar and would draw the line all the time.
+            win.setTitlebarSeparatorStyle(if preview { NSTitlebarSeparatorStyle::None } else { NSTitlebarSeparatorStyle::Automatic });
             let first: &NSResponder = match web {
                 Some(w) if preview => w,
                 _ => &iv.editor,
@@ -294,7 +296,7 @@ impl DocumentView {
     fn render(&self) {
         let iv = self.ivars();
         let text = iv.editor.string().to_string();
-        let html = preview::page_html(&text, &settings::font_family(), settings::BASE_SIZE, settings::column_width());
+        let html = preview::page_html(&text, &settings::font_family(), settings::BASE_SIZE);
         let web = iv.web.get_or_init(|| self.make_web());
         web.render(&html, &preview::base_url(self.doc_dir().as_deref()));
     }
@@ -310,7 +312,7 @@ impl DocumentView {
     fn make_web(&self) -> Retained<PreviewView> {
         let web = PreviewView::new(self.mtm(), self.bounds(), &self.ivars().editor);
         web.setTranslatesAutoresizingMaskIntoConstraints(false);
-        // Under the find bar, status pill and toolbar.
+        // Under the find bar and status pill.
         self.addSubview_positioned_relativeTo(&web, NSWindowOrderingMode::Below, Some(&self.ivars().scroll));
         NSLayoutConstraint::activateConstraints(&NSArray::from_retained_slice(&[
             web.topAnchor().constraintEqualToAnchor(&self.topAnchor()),
