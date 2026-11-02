@@ -2649,6 +2649,62 @@ fn preview_rerenders_after_reload() {
     });
 }
 
+/// A long document and the same with its last line changed.
+fn long_doc() -> (String, String) {
+    let body: String = (0..300).map(|i| format!("line {i}\n\n")).collect();
+    let changed = body.replace("line 299", "line 299 changed");
+    (body, changed)
+}
+
+fn reload_keeps_edit_scroll() {
+    let (body, changed) = long_doc();
+    on_disk("scroll-edit", &body, |fx| {
+        let editor = fx.doc.editor().unwrap();
+        let clip = editor.enclosingScrollView().unwrap().contentView();
+        let at = body.find("line 200").unwrap();
+        editor.scrollRangeToVisible(NSRange::new(at, 0));
+        ui::pump(0.05);
+        let y = clip.bounds().origin.y;
+        assert!(y > 1000.0, "scrolled: {y}");
+        later();
+        fx.write(&changed);
+        fx.doc.disk_changed();
+        ui::pump(0.1);
+        assert!(fx.text().contains("line 299 changed"));
+        assert_eq!(clip.bounds().origin.y, y, "viewport kept");
+    });
+}
+
+fn reload_keeps_preview_scroll() {
+    let (body, changed) = long_doc();
+    on_disk("scroll-preview", &body, |fx| {
+        let v = content_of(&fx.win);
+        v.set_mode(Mode::Preview);
+        let web = v.preview().expect("preview");
+        wait_for_js(&web, "String(document.body && document.body.dataset.rendered)", "1", 10.0);
+        web.eval("window.scrollTo(0, 2000); ''", 1.0);
+        wait_for_js(&web, "String(Math.round(window.scrollY))", "2000", 2.0);
+        later();
+        fx.write(&changed);
+        fx.doc.disk_changed();
+        wait_for_js(&web, "String(!!document.body && document.body.textContent.includes('line 299 changed') && document.body.dataset.rendered)", "1", 5.0);
+        ui::pump(0.2);
+        assert_eq!(web.eval("String(Math.round(window.scrollY))", 1.0).as_deref(), Some("2000"), "viewport kept");
+    });
+}
+
+/// Runs after reload_keeps_preview_scroll: a new window starts at the top.
+fn new_preview_starts_at_top() {
+    on_disk("scroll-fresh", &long_doc().0, |fx| {
+        let v = content_of(&fx.win);
+        v.set_mode(Mode::Preview);
+        let web = v.preview().expect("preview");
+        wait_for_js(&web, "String(document.body && document.body.dataset.rendered)", "1", 10.0);
+        ui::pump(0.2);
+        assert_eq!(web.eval("String(Math.round(window.scrollY))", 1.0).as_deref(), Some("0"));
+    });
+}
+
 fn autosave_unaffected_by_mode() {
     on_disk("autosave-mode", "a\n", |fx| {
         fx.type_text("b");
@@ -2960,6 +3016,9 @@ fn main() {
         ("preview_ignores_typing_and_edit_commands", preview_ignores_typing_and_edit_commands),
         ("cmd_f_in_preview_opens_find_in_edit", cmd_f_in_preview_opens_find_in_edit),
         ("preview_rerenders_after_reload", preview_rerenders_after_reload),
+        ("reload_keeps_edit_scroll", reload_keeps_edit_scroll),
+        ("reload_keeps_preview_scroll", reload_keeps_preview_scroll),
+        ("new_preview_starts_at_top", new_preview_starts_at_top),
         ("autosave_unaffected_by_mode", autosave_unaffected_by_mode),
         ("view_menu_checks_active_mode", view_menu_checks_active_mode),
         ("first_save_rebases_images", first_save_rebases_images),

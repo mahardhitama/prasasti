@@ -71,7 +71,24 @@ try {
     }
   }
 } finally {
+  keepScroll();
   document.body.dataset.rendered = "1";
+}
+
+// Every edit re-renders by loading a new page: put the viewport back where it
+// was, once now and again when images have their sizes. sessionStorage lives
+// as long as this web view, so a new window starts at the top.
+function keepScroll() {
+  try {
+    const y = Number(sessionStorage.getItem("scrollY")) || 0;
+    if (y) {
+      scrollTo(0, y);
+      addEventListener("load", () => scrollTo(0, y), { once: true });
+    }
+    addEventListener("scroll", () => sessionStorage.setItem("scrollY", String(scrollY)), { passive: true });
+  } catch (e) {
+    console.error(e);
+  }
 }
 
 // Highlights a tagged block (no auto-detection), then wraps each line in a
