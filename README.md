@@ -41,7 +41,7 @@ A Rust workspace with two crates:
 
 ## Build
 
-- `bin/bundle`: builds `target/Prasasti.app`.
+- `bin/bundle`: builds the app in `target/bundle.noindex/Prasasti.app`, linked from `target/Prasasti.app`. Spotlight skips `.noindex`, so the build copy stays out of Open With. To install, copy `target/bundle.noindex/Prasasti.app` to `~/Applications`.
 - `bin/test`: runs every test.
 
 ## License

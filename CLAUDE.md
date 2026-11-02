@@ -10,7 +10,7 @@ Praśasti for macOS: a native AppKit Markdown writer. Top requirement: typed tex
 - Core tests only: `cargo test -p prasasti-core`. One core test: `cargo test -p prasasti-core <name>`.
 - App tests: `cargo test -p prasasti --test app`. The binary uses `harness = false` and its own `main` (bottom of `crates/prasasti/tests/app.rs`), so it ignores name filters and always runs the whole list. A new test must be added to the `tests` array in `main`, or it silently never runs.
 - `cargo clippy --workspace --all-targets`: must stay error-free.
-- `bin/bundle`: release build to `target/Prasasti.app` (icon from `resources/prasasti.svg`, fonts copied, ad-hoc signed).
+- `bin/bundle`: release build to `target/bundle.noindex/Prasasti.app` (icon from `resources/prasasti.svg`, fonts copied, ad-hoc signed). `target/Prasasti.app` is a symlink to it. The bundle stays out of Open With because Spotlight skips `.noindex` and the script unregisters it from LaunchServices. Launching it, for example with `open -a`, registers it again until the next `bin/bundle`. To install, copy the real bundle (not the symlink) into `~/Applications`.
 - `bin/smoke`: drives the real bundled app through Accessibility/JXA (open, type, autosave, external change, quit). It **takes over the user's desktop** and needs Accessibility permission (exit 2 if missing). It aborts if Praśasti is already running. Don't run it without telling the user.
 - Manual checklist and its results: `docs/manual-checks.md`.
 
@@ -61,4 +61,4 @@ How the app pieces fit together:
 - `main` pins the Aqua appearance, so colour assertions don't depend on the system's Dark mode.
 - `build.rs` embeds `crates/prasasti/tests/Info.plist` in the test binary. It gives the tests a bundle id, so saving behaves as it does in the app.
 - Tests that touch the clipboard must use `with_clipboard`, which saves and restores every pasteboard item. Tests that create drafts must clean up only the drafts they made.
-- If `build.rs` fails with "packaging/Info.plist exists" even though the file is present, the build-script cache has stale paths (another checkout built into this `target/`). Run `cargo clean -p prasasti`.
+- If `build.rs` fails with "packaging/Info.plist exists" even though the file is present, the build-script cache has stale paths (another checkout built into this `target/`). `cargo clean -p prasasti` may not be enough. Delete `target/*/build/prasasti-*` and `target/*/.fingerprint/prasasti-*`.
