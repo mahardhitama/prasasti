@@ -510,6 +510,45 @@ fn print_remote_image_times_out() {
     assert!(secs < 10.0, "print took {secs:.1} s");
 }
 
+/// A PNG of `w` x `h` pixels.
+fn png(w: isize, h: isize) -> Vec<u8> {
+    // SAFETY: null planes make AppKit allocate the buffer; AppKit's colour space constant; empty properties.
+    unsafe {
+        let rep = objc2_app_kit::NSBitmapImageRep::initWithBitmapDataPlanes_pixelsWide_pixelsHigh_bitsPerSample_samplesPerPixel_hasAlpha_isPlanar_colorSpaceName_bytesPerRow_bitsPerPixel(
+            objc2_app_kit::NSBitmapImageRep::alloc(), std::ptr::null_mut(), w, h, 8, 4, true, false, objc2_app_kit::NSDeviceRGBColorSpace, 0, 0,
+        )
+        .expect("bitmap");
+        rep.representationUsingType_properties(objc2_app_kit::NSBitmapImageFileType::PNG, &objc2_foundation::NSDictionary::new()).expect("png").to_vec()
+    }
+}
+
+/// Print draws images relative to the document's folder, as Preview does (the
+/// HTML importer shows a 16 pt placeholder for them in the bundled app), and
+/// scales a wide one down to the page's text width.
+fn print_draws_local_images() {
+    on_disk("print-img", "a\n\n![x](img.png)\n\n![big](big.png)\n\n![gone](missing.png)\n\nb\n", |fx| {
+        let dir = fx.path.parent().unwrap();
+        std::fs::write(dir.join("img.png"), png(40, 30)).unwrap();
+        std::fs::write(dir.join("big.png"), png(2000, 1000)).unwrap();
+        let (_, tv) = print_view(&fx.doc);
+        // SAFETY: plain getters.
+        let (storage, layout, container) = unsafe { (tv.textStorage().unwrap(), tv.layoutManager().unwrap(), tv.textContainer().unwrap()) };
+        let s = storage.string().to_string();
+        assert!(s.contains("gone"), "a missing image prints its alt text: {s:?}");
+        let sizes: Vec<_> = s.encode_utf16().enumerate().filter(|(_, c)| *c == 0xFFFC).map(|(at, _)| {
+            // SAFETY: `at` is in bounds; a null actual-range pointer is allowed.
+            let glyphs = unsafe { layout.glyphRangeForCharacterRange_actualCharacterRange(NSRange::new(at, 1), std::ptr::null_mut()) };
+            let r = layout.boundingRectForGlyphRange_inTextContainer(glyphs, &container);
+            (r.size.width, r.size.height)
+        }).collect();
+        let text_width = tv.frame().size.width - 2.0 * container.lineFragmentPadding();
+        assert_eq!(sizes.len(), 2, "{sizes:?}");
+        assert_eq!(sizes[0].0, 40.0, "small image keeps its size: {sizes:?}");
+        assert!((sizes[1].0 - text_width).abs() < 0.5, "big image fits the text width {text_width}: {sizes:?}");
+        assert!((sizes[1].1 - text_width / 2.0).abs() < 2.0, "aspect kept: {sizes:?}");
+    });
+}
+
 fn find_bar(e: &EditorView) -> Retained<FindBar> {
     e.find_bar().expect("editor has a find bar")
 }
@@ -2935,6 +2974,7 @@ fn main() {
         ("print_operation_builds", print_operation_builds),
         ("print_uses_editor_font_top_aligned", print_uses_editor_font_top_aligned),
         ("print_remote_image_times_out", print_remote_image_times_out),
+        ("print_draws_local_images", print_draws_local_images),
         ("paints_matches", paints_matches),
         ("return_steps_matches", return_steps_matches),
         ("replace_all_one_undo", replace_all_one_undo),

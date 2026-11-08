@@ -11,7 +11,7 @@ use objc2::runtime::{AnyObject, Bool, Sel};
 use objc2::{DefinedClass, MainThreadOnly, Message, define_class, msg_send, sel};
 use objc2_app_kit::{
     NSAlert, NSAlertFirstButtonReturn, NSFont, NSFontAttributeName, NSFontManager, NSAttributedStringDocumentFormats, NSDocumentTypeDocumentOption, NSHTMLTextDocumentType, NSTimeoutDocumentOption, NSColor, NSForegroundColorAttributeName, NSLayoutManager, NSPrintInfo, NSPrintOperation, NSTextContainer, NSTextStorage, NSTextView, NSAlertSecondButtonReturn, NSBackingStoreType, NSDocument,
-    NSDocumentChangeType, NSModalResponse, NSSaveOperationType,
+    NSDocumentChangeType, NSModalResponse, NSSaveOperationType, NSImage, NSTextAttachment, NSAttributedStringAttachmentConveniences,
     NSApplication, NSWindow, NSWindowController, NSWindowStyleMask, NSWindowTabbingMode,
 };
 use objc2_foundation::{
@@ -843,7 +843,8 @@ impl PrasastiDocument {
         info.setVerticallyCentered(false);
         info.setHorizontallyCentered(false);
 
-        let html = crate::export::print_html(&self.text().to_string(), &crate::settings::font_family());
+        let dir = doc.fileURL().and_then(|u| u.path()).map(|p| std::path::PathBuf::from(p.to_string()));
+        let (html, images) = crate::export::print_html(&self.text().to_string(), &crate::settings::font_family(), dir.as_deref().and_then(|p| p.parent()));
         let data = NSData::with_bytes(html.as_bytes());
         // A remote image may not answer: give up on it after 5 s, not the default ~30 s.
         // SAFETY: AppKit's option keys with values of their documented types; no attributes out-parameter.
@@ -879,6 +880,8 @@ impl PrasastiDocument {
         black_where_unset(&storage);
         // The importer can't see the bundled font (JetBrains Mono prints as Times).
         editor_family(&storage, mtm);
+        let page_height = info.paperSize().height - info.topMargin() - info.bottomMargin();
+        place_images(&storage, &images, NSSize::new(width - 2.0 * container.lineFragmentPadding(), page_height));
         // Lay out to the full height now, so pagination sees the real length.
         layout.ensureLayoutForTextContainer(&container);
         view.sizeToFit();
@@ -1057,6 +1060,35 @@ fn editor_family(storage: &NSTextStorage, mtm: MainThreadMarker) {
             }
             at = run.end().max(at + 1);
         }
+    }
+}
+
+/// Replaces each image marker from `export::print_html` with its picture,
+/// scaled down to fit `max` (a page's text area); an unreadable file prints its alt text.
+fn place_images(storage: &NSTextStorage, images: &[crate::export::PrintImage], max: NSSize) {
+    let text = storage.string().to_string();
+    let mut marks = Vec::new();
+    let mut at = 0;
+    for c in text.chars() {
+        let i = (c as u32).wrapping_sub(crate::export::IMAGE_MARK) as usize;
+        if let Some(img) = images.get(i) {
+            marks.push((NSRange::new(at, c.len_utf16()), img));
+        }
+        at += c.len_utf16();
+    }
+    // From the end, so earlier ranges stay valid.
+    for (range, img) in marks.into_iter().rev() {
+        let image = NSImage::initWithContentsOfFile(NSImage::alloc(), &NSString::from_str(&img.path.to_string_lossy()));
+        let Some(image) = image.filter(|i| i.size().width > 0.0 && i.size().height > 0.0) else {
+            storage.replaceCharactersInRange_withString(range, &NSString::from_str(&img.alt));
+            continue;
+        };
+        let size = image.size();
+        let scale = (max.width / size.width).min(max.height / size.height).min(1.0);
+        let attachment = NSTextAttachment::new();
+        attachment.setImage(Some(&image));
+        attachment.setBounds(NSRect::new(NSPoint::new(0.0, 0.0), NSSize::new(size.width * scale, size.height * scale)));
+        storage.replaceCharactersInRange_withAttributedString(range, &NSAttributedString::attributedStringWithAttachment(&attachment));
     }
 }
 
