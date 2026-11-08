@@ -549,6 +549,28 @@ fn print_draws_local_images() {
     });
 }
 
+/// A printed table draws a border on every side of every cell.
+fn print_table_has_cell_borders() {
+    use objc2_app_kit::NSTextBlockLayer;
+    use objc2_foundation::NSRectEdge;
+    let d = doc_from(b"| head |\n|---|\n| cell |\n");
+    let (_, tv) = print_view(&d);
+    // SAFETY: a plain getter.
+    let storage = unsafe { tv.textStorage() }.unwrap();
+    let s = storage.string().to_string();
+    for word in ["head", "cell"] {
+        let at = s[..s.find(word).expect(word)].encode_utf16().count();
+        // SAFETY: NSParagraphStyleAttributeName is AppKit's key; `at` is in bounds.
+        let style = unsafe { storage.attribute_atIndex_effectiveRange(objc2_app_kit::NSParagraphStyleAttributeName, at, std::ptr::null_mut()) };
+        let style: Retained<objc2_app_kit::NSParagraphStyle> = style.expect("a paragraph style").downcast().unwrap();
+        let block = style.textBlocks().firstObject().expect("a table cell");
+        for edge in [NSRectEdge::MinX, NSRectEdge::MaxX, NSRectEdge::MinY, NSRectEdge::MaxY] {
+            assert!(block.widthForLayer_edge(NSTextBlockLayer::Border, edge) > 0.0, "{word} {edge:?}");
+            assert!(block.borderColorForEdge(edge).is_some(), "{word} {edge:?}");
+        }
+    }
+}
+
 fn find_bar(e: &EditorView) -> Retained<FindBar> {
     e.find_bar().expect("editor has a find bar")
 }
@@ -2975,6 +2997,7 @@ fn main() {
         ("print_uses_editor_font_top_aligned", print_uses_editor_font_top_aligned),
         ("print_remote_image_times_out", print_remote_image_times_out),
         ("print_draws_local_images", print_draws_local_images),
+        ("print_table_has_cell_borders", print_table_has_cell_borders),
         ("paints_matches", paints_matches),
         ("return_steps_matches", return_steps_matches),
         ("replace_all_one_undo", replace_all_one_undo),

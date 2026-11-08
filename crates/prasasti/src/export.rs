@@ -61,9 +61,12 @@ pub fn print_html(markdown: &str, family: &str, doc_dir: Option<&Path>) -> (Stri
     }
     let mut body = String::new();
     html::push_html(&mut body, events.into_iter());
-    let page = format!("<html><head><meta charset=\"utf-8\"></head><body style=\"font-family:'{attr}';color:#000\">{body}</body></html>");
+    let page = format!("<html><head><meta charset=\"utf-8\"><style>{TABLE_CSS}</style></head><body style=\"font-family:'{attr}';color:#000\">{body}</body></html>");
     (page, images)
 }
+
+/// Grid lines round every cell, as in Preview (the importer turns these into NSTextTable borders).
+const TABLE_CSS: &str = "table{border-collapse:collapse}th,td{border:1px solid #000;padding:2px 6px}";
 
 /// The file an image destination names: `file://`, absolute, or relative to `doc_dir`.
 /// shortcut: no percent-decoding (`a%20b.png`), Preview's URL base does it; add if users hit it.
