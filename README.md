@@ -22,6 +22,7 @@
 - **Formatting shortcuts**: bold (⌘B), italic (⌘I), strikethrough (⇧⌘X), link (⌘K), Tab / Shift+Tab list nesting.
 - **Image paste**: pasted images and image files land in `<document>.assets/` as `![](…)` links. Save As carries them and rewrites relative paths.
 - **Copy as HTML** (⇧⌘C) and print.
+- **Line numbers and indent guides** in the margin and leading whitespace of the editor.
 - **Text zoom** (⌘+, ⌘−, ⌘0), font choice, and a fixed 80-column layout in JetBrains Mono.
 - **Appearance**: System, Light or Dark (Catppuccin Latte and Mocha), with Liquid Glass chrome.
 - UTF-8 with LF only; non-UTF-8 files are refused rather than corrupted.
