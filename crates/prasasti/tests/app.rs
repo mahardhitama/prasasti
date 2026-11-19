@@ -461,8 +461,10 @@ fn print_operation_builds() {
     assert_eq!(tv.frame().size.width, width);
     assert!(tv.isVerticallyResizable() && !tv.isHorizontallyResizable());
     assert!(tv.frame().size.height > 20.0, "laid out to its full height");
+    // Body text is black (the heading number is grey).
+    let body = s[..s.find("body").unwrap()].encode_utf16().count();
     // SAFETY: plain getters; a null range pointer is allowed.
-    let colour = unsafe { tv.textStorage().unwrap().attribute_atIndex_effectiveRange(objc2_app_kit::NSForegroundColorAttributeName, 0, std::ptr::null_mut()) };
+    let colour = unsafe { tv.textStorage().unwrap().attribute_atIndex_effectiveRange(objc2_app_kit::NSForegroundColorAttributeName, body, std::ptr::null_mut()) };
     let colour: Retained<objc2_app_kit::NSColor> = colour.expect("a colour").downcast().expect("an NSColor");
     let rgb = colour.colorUsingColorSpace(&objc2_app_kit::NSColorSpace::sRGBColorSpace()).expect("rgb");
     assert!(rgb.redComponent() < 0.01 && rgb.greenComponent() < 0.01 && rgb.blueComponent() < 0.01);
@@ -2581,7 +2583,7 @@ fn file_opens_in_preview_untitled_in_edit() {
     let v = content_of(&document_window(&d));
     assert_eq!(v.mode(), Mode::Preview);
     assert_eq!(v.toolbar().selected(), Mode::Preview);
-    assert!(v.preview_html().expect("rendered").contains("<h1>hi</h1>"));
+    assert!(v.preview_html().expect("rendered").contains("<h1><span class=\"hn\">1. </span>hi</h1>"));
     d.close();
     let u = PrasastiDocument::new(mtm());
     u.makeWindowControllers();

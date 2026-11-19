@@ -87,6 +87,7 @@ pub fn page_html(markdown: &str, font_family: &str, font_px: f64) -> String {
         | Options::ENABLE_GFM;
     let mut events = Vec::new();
     let mut in_lone_math = false;
+    let mut numbers = crate::export::HeadingNumbers::default();
     for (e, range) in Parser::new_ext(markdown, options).into_offset_iter() {
         match e {
             // Its content was replaced by the DisplayMath below.
@@ -101,6 +102,12 @@ pub fn page_html(markdown: &str, font_family: &str, font_px: f64) -> String {
                 if let Some(tex) = lone_display_math(&markdown[range]) {
                     events.push(Event::DisplayMath(tex.to_string().into()));
                     in_lone_math = true;
+                }
+            }
+            Event::Start(Tag::Heading { level, .. }) => {
+                events.push(e);
+                if let Some(n) = numbers.next(level) {
+                    events.push(Event::InlineHtml(format!(r#"<span class="hn">{n} </span>"#).into()));
                 }
             }
             Event::Start(Tag::Image { link_type, dest_url, title, id }) if dest_url.starts_with("file://") => {
@@ -631,6 +638,14 @@ mod tests {
         let p = page("Before:\n\n$$\\frac{1}{$$\n\nAfter $5 and $$6.");
         assert!(p.contains(r#"<p><span class="math math-display">\frac{1}{</span></p>"#), "{p}");
         assert!(p.contains("After $5 and $$6."), "{p}");
+    }
+
+    #[test]
+    fn headings_numbered_to_h5() {
+        let p = page("# A\n## B\n###### C\n");
+        assert!(p.contains(r#"<h1><span class="hn">1. </span>A</h1>"#), "{p}");
+        assert!(p.contains(r#"<h2><span class="hn">1.1. </span>B</h2>"#), "{p}");
+        assert!(p.contains("<h6>C</h6>"), "{p}");
     }
 
     #[test]
