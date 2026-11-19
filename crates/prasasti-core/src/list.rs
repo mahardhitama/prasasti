@@ -30,6 +30,20 @@ fn columns(line: &[u16]) -> usize {
         .fold(0, |col, &c| if c == TAB { col + 4 - col % 4 } else { col + 1 })
 }
 
+/// Offsets in `line` (one line, no separator) where an indent guide starts:
+/// the character at each four-column stop inside the leading whitespace.
+pub fn guide_offsets(line: &[u16]) -> Vec<usize> {
+    let mut col = 0;
+    let mut out = Vec::new();
+    for (i, &c) in line[..lead(line)].iter().enumerate() {
+        if col % STEP == 0 {
+            out.push(i);
+        }
+        col = if c == TAB { col + STEP - col % STEP } else { col + 1 };
+    }
+    out
+}
+
 /// `^ {0,3}([-*])([ \t]*\1){2,}[ \t]*$`: "* * *" is a rule, not an item.
 fn is_rule(line: &[u16]) -> bool {
     let spaces = line.iter().take_while(|&&c| c == SPACE).count();
@@ -215,6 +229,18 @@ mod tests {
         fn selection(&self) -> String {
             format!("{}-{}@{}", self.sel.start, self.sel.end, self.caret())
         }
+    }
+
+    #[test]
+    fn guides_at_four_column_stops() {
+        assert_eq!(guide_offsets(&u("- top")), Vec::<usize>::new());
+        assert_eq!(guide_offsets(&u("    - one")), vec![0]);
+        assert_eq!(guide_offsets(&u("        - two")), vec![0, 4]);
+        assert_eq!(guide_offsets(&u("  - two spaces")), vec![0]);
+        // A tab runs to the next stop: "\t\t" and "  \t" both reach column 8.
+        assert_eq!(guide_offsets(&u("\t\tx")), vec![0, 1]);
+        assert_eq!(guide_offsets(&u("  \t  x")), vec![0, 3]);
+        assert_eq!(guide_offsets(&u("        ")), vec![0, 4]);
     }
 
     #[test]

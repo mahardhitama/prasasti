@@ -200,6 +200,12 @@ locked). `cargo clippy --workspace --all-targets` has no errors.
   the chosen file. ⌘S writes to disk at once. ⇧⌘S is **Duplicate** (Save As… is
   ⌥⇧⌘S, as with autosave-in-place); ⌘S on the copy shows the save sheet and wrote
   `dup.md`.
+- **needs user**: **line numbers and indent guides.** Open
+  `fixtures/kitchen-sink/kitchen-sink.md` in Edit. Each file line has one
+  number, right-aligned next to the column. Wrapped lines have no number. The
+  caret's line number uses the text colour. Nested list items and indented code
+  show faint vertical guides at each 4-column stop, through wrapped lines. Check
+  that numbers follow typing, Return, undo, zoom and the appearance switch.
 - ✅ **An external edit triggers the sheet.** With local edits, overwriting the
   file shows "The file changed on disk." with Keep Mine / Reload. `bin/smoke`
   also covers Reload.

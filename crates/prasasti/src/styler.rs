@@ -157,10 +157,10 @@ impl<'a> Ctx<'a> {
 
 /// A paragraph: `start..content_end` is its text, `content_end..end` its separator.
 #[derive(Clone, Copy)]
-struct Para {
-    start: usize,
-    content_end: usize,
-    end: usize,
+pub(crate) struct Para {
+    pub(crate) start: usize,
+    pub(crate) content_end: usize,
+    pub(crate) end: usize,
 }
 
 // The paragraph separators of `NSString paragraphRangeForRange:`: LF, CR, CRLF, U+2029.
@@ -171,7 +171,7 @@ fn is_sep(u: u16) -> bool {
 }
 
 /// The paragraph that starts at `start`.
-fn para_at(buf: &[u16], start: usize) -> Para {
+pub(crate) fn para_at(buf: &[u16], start: usize) -> Para {
     let content_end = buf[start..].iter().position(|&u| is_sep(u)).map_or(buf.len(), |k| start + k);
     let end = match buf.get(content_end) {
         None => content_end,
@@ -182,7 +182,7 @@ fn para_at(buf: &[u16], start: usize) -> Para {
 }
 
 /// Index and start of the paragraph holding `pos` (clamped to the text).
-fn locate(buf: &[u16], pos: usize) -> (usize, usize) {
+pub(crate) fn locate(buf: &[u16], pos: usize) -> (usize, usize) {
     let pos = pos.min(buf.len());
     let mut start = buf[..pos].iter().rposition(|&u| is_sep(u)).map_or(0, |k| k + 1);
     // `pos` between CR and LF belongs to the paragraph the CRLF ends.

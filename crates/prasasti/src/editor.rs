@@ -3,10 +3,10 @@ use std::ptr::NonNull;
 
 use objc2::rc::{Retained, Weak};
 use objc2::runtime::{AnyObject, ProtocolObject};
-use objc2::{AnyThread, DefinedClass, MainThreadOnly, define_class, msg_send};
+use objc2::{AnyThread, DefinedClass, MainThreadOnly, Message, define_class, msg_send};
 use objc2_app_kit::{
     NSAppearanceCustomization, NSAppearanceNameAqua, NSAppearanceNameDarkAqua,
-    NSAutoresizingMaskOptions, NSBeep, NSBackgroundColorAttributeName, NSFontAttributeName, NSStringDrawing, NSEvent, NSEventModifierFlags, NSFont,
+    NSAutoresizingMaskOptions, NSBeep, NSCompositingOperation, NSRectFillUsingOperation, NSBackgroundColorAttributeName, NSFontAttributeName, NSStringDrawing, NSEvent, NSEventModifierFlags, NSFont,
     NSFontManager,
     NSForegroundColorAttributeName, NSGlyphProperty, NSLayoutManager, NSLayoutManagerDelegate,
     NSPasteboard, NSPasteboardTypeString, NSResponder, NSScrollView, NSText, NSTextContainer,
@@ -27,7 +27,7 @@ use crate::document::PrasastiDocument;
 use crate::find_bar::FindBar;
 use crate::status::StatusPill;
 use crate::settings;
-use crate::styler::{Styler, hidden_key};
+use crate::styler::{Styler, hidden_key, locate, para_at};
 use crate::theme::{Palette, base_font, palette};
 use crate::util::{Observer, guarded, observe, to_u16};
 
@@ -73,6 +73,8 @@ define_class!(
             let font = self.ivars().font.borrow();
             // The selection moves after this; the end of the edit is where it lands.
             guarded(|| styler.restyle_edit(storage, &font, &pal, range, range.end()));
+            // Lines added or removed renumber everything below.
+            self.invalidate_gutter();
             if let Some(bar) = self.find_bar() {
                 guarded(|| bar.text_changed());
             }
@@ -141,6 +143,8 @@ define_class!(
             if old == new {
                 return;
             }
+            // The caret's line number has its own colour.
+            self.invalidate_gutter();
             let Ok(mut styler) = self.ivars().styler.try_borrow_mut() else { return };
             let pal = self.ivars().pal.borrow();
             let font = self.ivars().font.borrow();
@@ -149,6 +153,14 @@ define_class!(
     }
 
     impl EditorView {
+        /// Line numbers and indent guides go under the text.
+        #[unsafe(method(drawViewBackgroundInRect:))]
+        fn draw_view_background_in_rect(&self, rect: NSRect) {
+            // SAFETY: NSTextView's own implementation, same signature.
+            let () = unsafe { msg_send![super(self), drawViewBackgroundInRect: rect] };
+            guarded(|| self.draw_gutter(rect));
+        }
+
         #[unsafe(method(viewDidChangeEffectiveAppearance))]
         fn view_did_change_effective_appearance(&self) {
             // SAFETY: NSView's own implementation, same signature.
@@ -330,8 +342,19 @@ fn wheel_step(pending: f64, lines: f64) -> (f64, i32) {
     if sum.abs() >= 1.0 { (0.0, sum.signum() as i32) } else { (sum, 0) }
 }
 
-/// The editor's least horizontal inset on each side.
+/// The editor's least horizontal inset on each side, before the gutter.
 const COLUMN_SIDE: f64 = 16.0;
+/// Space between a line number and the text column.
+const GUTTER_GAP: f64 = 12.0;
+/// Line numbers are this fraction of the editor font size.
+const NUMBER_SCALE: f64 = 0.8;
+/// Indent guides are the marker colour at this opacity.
+const GUIDE_ALPHA: f64 = 0.4;
+
+/// The line-number font: the editor's family, smaller.
+fn number_font(base: &NSFont) -> Retained<NSFont> {
+    NSFont::fontWithName_size(&base.fontName(), base.pointSize() * NUMBER_SCALE).unwrap_or_else(|| base.retain())
+}
 
 fn range_of(r: NSRange) -> std::ops::Range<usize> {
     r.location..r.end()
@@ -377,18 +400,106 @@ impl EditorView {
         // SAFETY: a plain getter; the editor is built with a container.
         let Some(container) = (unsafe { self.textContainer() }) else { return };
         let avail = scroll.contentSize().width;
-        if avail <= 2.0 * COLUMN_SIDE {
+        let side = self.side_pts();
+        if avail <= 2.0 * side {
             return; // not laid out yet
         }
-        let width = self.column_pts().min(avail - 2.0 * COLUMN_SIDE);
+        let width = self.column_pts().min(avail - 2.0 * side);
         let size = NSSize::new(width, f64::MAX);
         if container.size() != size {
             container.setSize(size);
         }
         let old = self.textContainerInset();
-        let inset = NSSize::new(((avail - width) / 2.0).max(COLUMN_SIDE), old.height);
+        let inset = NSSize::new(((avail - width) / 2.0).max(side), old.height);
         if old != inset {
             self.setTextContainerInset(inset);
+        }
+    }
+
+    /// The least inset on each side of the column: room for a line number.
+    // shortcut: room for four digits; numbers past 9999 run further left and
+    // clip only at the minimum window width. Measure the line count if that bites.
+    pub fn side_pts(&self) -> f64 {
+        let attrs = NSDictionary::from_slices(&[unsafe { NSFontAttributeName }], &[&*number_font(&settings::current_font()) as &AnyObject]);
+        // SAFETY: the font attribute's value is a font.
+        let digits = unsafe { NSString::from_str("0000").sizeWithAttributes(Some(&attrs)) }.width;
+        COLUMN_SIDE.max(digits + GUTTER_GAP + COLUMN_SIDE / 2.0)
+    }
+
+    /// Marks the margin left of the column for redraw (the line numbers).
+    fn invalidate_gutter(&self) {
+        let v = self.visibleRect();
+        let w = self.textContainerOrigin().x;
+        self.setNeedsDisplayInRect(NSRect::new(v.origin, NSSize::new(w, v.size.height)));
+    }
+
+    /// Draws, for each paragraph in `rect`, its line number left of the column
+    /// and a guide at each indent stop of its leading whitespace.
+    fn draw_gutter(&self, rect: NSRect) {
+        // SAFETY: plain getters; the editor is built with this chain.
+        let (Some(lm), Some(tc)) = (unsafe { self.layoutManager() }, unsafe { self.textContainer() }) else { return };
+        let origin = self.textContainerOrigin();
+        let pal = self.ivars().pal.borrow();
+        let font = number_font(&self.ivars().font.borrow());
+        // shortcut: copies the whole text per draw (as the styler does per edit);
+        // cache it if huge documents scroll slowly.
+        let buf = to_u16(&self.string());
+        // Whole container width: the numbers sit outside it, the text inside.
+        let r = NSRect::new(NSPoint::new(0.0, rect.origin.y - origin.y), NSSize::new(tc.size().width, rect.size.height));
+        let glyphs = lm.glyphRangeForBoundingRect_inTextContainer(r, &tc);
+        // SAFETY: a null actual-range pointer is allowed.
+        let chars = unsafe { lm.characterRangeForGlyphRange_actualGlyphRange(glyphs, std::ptr::null_mut()) };
+        let caret_line = locate(&buf, self.selectedRange().location).0;
+        let (mut line, mut start) = locate(&buf, chars.location);
+        let guide = pal.marker.colorWithAlphaComponent(GUIDE_ALPHA);
+        loop {
+            let p = para_at(&buf, start);
+            // Top of the first fragment, baseline of the first line, bottom of the last.
+            let (top, baseline, bottom, glyph_x) = if p.start < buf.len() {
+                let first = lm.glyphIndexForCharacterAtIndex(p.start);
+                let last = lm.glyphIndexForCharacterAtIndex(p.content_end.max(p.start + 1) - 1);
+                // SAFETY: null effective-range pointers are allowed; both are glyph indexes.
+                let (f, l) = unsafe {
+                    (
+                        lm.lineFragmentRectForGlyphAtIndex_effectiveRange(first, std::ptr::null_mut()),
+                        lm.lineFragmentRectForGlyphAtIndex_effectiveRange(last, std::ptr::null_mut()),
+                    )
+                };
+                let lm2 = &lm;
+                let x = move |i: usize| f.origin.x + lm2.locationForGlyphAtIndex(lm2.glyphIndexForCharacterAtIndex(i)).x;
+                (f.origin.y, f.origin.y + lm.locationForGlyphAtIndex(first).y, l.origin.y + l.size.height, Some(x))
+            } else {
+                // The empty line after a final newline (or an empty document).
+                let f = lm.extraLineFragmentRect();
+                (f.origin.y, f.origin.y + font.ascender(), f.origin.y + f.size.height, None)
+            };
+            if top > r.origin.y + r.size.height {
+                break;
+            }
+            let color = if line == caret_line { &pal.text } else { &pal.marker };
+            let attrs = NSDictionary::from_slices(
+                &unsafe { [NSFontAttributeName, NSForegroundColorAttributeName] },
+                &[&*font as &AnyObject, color.as_ref()],
+            );
+            let n = NSString::from_str(&(line + 1).to_string());
+            // SAFETY: the attribute values match their keys.
+            let w = unsafe { n.sizeWithAttributes(Some(&attrs)) }.width;
+            let at = NSPoint::new(origin.x - GUTTER_GAP - w, origin.y + baseline - font.ascender());
+            // SAFETY: as above; drawing inside the view's drawRect:.
+            unsafe { n.drawAtPoint_withAttributes(at, Some(&attrs)) };
+            if let Some(x) = glyph_x {
+                guide.set();
+                for off in list::guide_offsets(&buf[p.start..p.content_end]) {
+                    let gx = (origin.x + x(p.start + off)).round();
+                    let g = NSRect::new(NSPoint::new(gx, origin.y + top), NSSize::new(1.0, bottom - top));
+                    NSRectFillUsingOperation(g, NSCompositingOperation::SourceOver);
+                }
+            }
+            if p.end == p.content_end || p.end > chars.end() {
+                break;
+            }
+            line += 1;
+            start = p.end;
         }
     }
 

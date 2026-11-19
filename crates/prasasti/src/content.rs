@@ -37,8 +37,6 @@ const RENDER_DELAY: f64 = 0.25;
 const BOTTOM_INSET: f64 = 24.0;
 /// The gap above the first line, as Preview's body padding (preview.css).
 const TOP_GAP: f64 = 16.0;
-/// The editor's horizontal inset on each side at the minimum width.
-const SIDE: f64 = 16.0;
 
 pub struct Ivars {
     editor: Retained<EditorView>,
@@ -416,7 +414,7 @@ impl DocumentView {
             self.ivars().scroll.scrollerStyle(),
             self.mtm(),
         );
-        let mut min = self.ivars().editor.column_pts() + 2.0 * SIDE + scroller;
+        let mut min = self.ivars().editor.column_pts() + 2.0 * self.ivars().editor.side_pts() + scroller;
         let visible = win.screen().or_else(|| NSScreen::mainScreen(self.mtm())).map(|s| s.visibleFrame());
         if let Some(v) = visible {
             min = min.min(v.size.width);

@@ -1953,6 +1953,41 @@ fn column_width_fixed() {
     win.close();
 }
 
+/// At the narrowest window the margin still fits a line number, and the
+/// number and the indent guide paint left of and inside the column.
+fn gutter_draws_numbers_and_guides() {
+    fresh_defaults();
+    let (win, e) = ui::window_with("- top\n    - nested\n");
+    set_content_width(&win, win.contentMinSize().width);
+    let inset = e.textContainerInset().width;
+    assert!(inset >= e.side_pts() - 0.5, "inset {inset} < side {}", e.side_pts());
+    let origin = e.textContainerOrigin();
+    let rep = e.bitmapImageRepForCachingDisplayInRect(e.visibleRect()).expect("bitmap");
+    e.cacheDisplayInRect_toBitmapImageRep(e.visibleRect(), &rep);
+    let scale = rep.pixelsWide() as f64 / e.visibleRect().size.width;
+    let bg = rep.colorAtX_y(0, 0).expect("bg");
+    // Any pixel in the band differs from the background.
+    let painted = |x0: f64, x1: f64, y0: f64, y1: f64| {
+        let v = e.visibleRect().origin;
+        let px = |p: f64, o: f64| ((p - o) * scale) as isize;
+        (px(x0, v.x)..px(x1, v.x)).any(|x| {
+            (px(y0, v.y)..px(y1, v.y)).any(|y| rep.colorAtX_y(x, y).is_some_and(|c| !c.isEqual(Some(&bg))))
+        })
+    };
+    // SAFETY: plain getters of the editor's TextKit 1 chain.
+    let lm = unsafe { e.layoutManager().unwrap() };
+    // SAFETY: null effective-range pointers are allowed.
+    let l1 = unsafe { lm.lineFragmentRectForGlyphAtIndex_effectiveRange(0, std::ptr::null_mut()) };
+    let l2 = unsafe { lm.lineFragmentRectForGlyphAtIndex_effectiveRange(6, std::ptr::null_mut()) };
+    let y = |r: NSRect| (origin.y + r.origin.y, origin.y + r.origin.y + r.size.height);
+    let (a, b) = y(l1);
+    assert!(painted(0.0, origin.x - 2.0, a, b), "no line number");
+    let (a, b) = y(l2);
+    // The guide sits at the start of the leading spaces, before the text.
+    assert!(painted(origin.x, origin.x + 8.0, a, b), "no indent guide");
+    win.close();
+}
+
 fn window_min_width_follows_column() {
     fresh_defaults();
     let (win, e) = ui::window_with("x");
@@ -3060,6 +3095,7 @@ fn main() {
         ("hold_shows_status_pill", hold_shows_status_pill),
         ("window_has_native_title", window_has_native_title),
         ("column_width_fixed", column_width_fixed),
+        ("gutter_draws_numbers_and_guides", gutter_draws_numbers_and_guides),
         ("window_min_width_follows_column", window_min_width_follows_column),
         ("restored_narrow_window_grows", restored_narrow_window_grows),
         ("kitchen_sink_lines_fit_column", kitchen_sink_lines_fit_column),

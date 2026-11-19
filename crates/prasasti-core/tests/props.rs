@@ -120,6 +120,12 @@ proptest! {
     }
 
     #[test]
+    fn guide_offsets_rise_in_bounds(t in text()) {
+        let g = list::guide_offsets(&t);
+        prop_assert!(g.windows(2).all(|w| w[0] < w[1]) && g.iter().all(|&i| i < t.len()), "{g:?}");
+    }
+
+    #[test]
     fn image_destinations_in_text(t in imagey()) {
         for d in image_destinations(&t) {
             prop_assert!(d.range.start < d.range.end && d.range.end <= t.len(), "{:?}", d.range);
