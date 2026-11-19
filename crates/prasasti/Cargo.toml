@@ -1,6 +1,6 @@
 [package]
 name = "prasasti"
-version = "0.0.2"
+version = "0.0.3"
 edition = "2024"
 license = "MIT"
 
@@ -15,4 +15,4 @@ objc2-app-kit = { version = "0.3.2", default-features = false, features = ["std"
 objc2-foundation = "0.3.2"
 objc2-web-kit = { version = "0.3.2", default-features = false, features = ["std", "WKWebView", "WKWebViewConfiguration", "WKURLSchemeHandler", "WKURLSchemeTask", "WKNavigationDelegate", "WKNavigationAction", "WKNavigation", "WKUserContentController", "WKScriptMessage", "WKScriptMessageHandler", "WKFrameInfo", "block2", "objc2-app-kit", "objc2-core-foundation"] }
 pulldown-cmark = { version = "0.13.6", default-features = false, features = ["html"] }
-prasasti-core = { version = "0.0.2", path = "../prasasti-core" }
+prasasti-core = { version = "0.0.3", path = "../prasasti-core" }
